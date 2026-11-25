@@ -41,13 +41,6 @@ if _OWNER_ACCEPTANCE_SPEC is None or _OWNER_ACCEPTANCE_SPEC.loader is None:
 OWNER_ACCEPTANCE_MODULE = importlib.util.module_from_spec(_OWNER_ACCEPTANCE_SPEC)
 sys.modules[_OWNER_ACCEPTANCE_SPEC.name] = OWNER_ACCEPTANCE_MODULE
 _OWNER_ACCEPTANCE_SPEC.loader.exec_module(OWNER_ACCEPTANCE_MODULE)
-_TERMINAL_GATE_SPEC = importlib.util.spec_from_file_location(
-    "ci_kvm_production_terminal", REPO / "tests/ci-kvm-production-terminal.py")
-if _TERMINAL_GATE_SPEC is None or _TERMINAL_GATE_SPEC.loader is None:
-    raise RuntimeError("could not load the hosted production-terminal regression")
-TERMINAL_GATE = importlib.util.module_from_spec(_TERMINAL_GATE_SPEC)
-sys.modules[_TERMINAL_GATE_SPEC.name] = TERMINAL_GATE
-_TERMINAL_GATE_SPEC.loader.exec_module(TERMINAL_GATE)
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
 CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
@@ -544,6 +537,20 @@ def invoke_shared_acceptance(sha: str) -> None:
             "--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)]
     command = " ".join(shlex.quote(value) for value in args)
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
+
+
+def invoke_production_terminal_acceptance() -> None:
+    """Run the required terminal gate with the installed control-group access."""
+    args = ["/usr/bin/python3", str(REPO / "tests/ci-kvm-production-terminal.py")]
+    command = "exec " + shlex.join(args)
+    run(["/usr/bin/sg", "lm-vm-control", "-c", command],
+        timeout=45 * 60, capture=False)
+
+
+def invoke_production_terminal_host_preflight() -> None:
+    """Check predictable terminal-gate tools before provisioning the VM."""
+    run(["/usr/bin/python3", str(REPO / "tests/ci-kvm-production-terminal.py"),
+         "--host-preflight"], timeout=15, capture=False)
 
 
 def verify_workspace_startup_post() -> None:
@@ -3040,6 +3047,7 @@ def main() -> int:
     try:
         hosted_kvm_guard()
         production_host_preflight()
+        invoke_production_terminal_host_preflight()
         fixed_name_preflight(install_parent=CI_INSTALL_PARENT)
         sha = os.environ["GITHUB_SHA"]
         source_sha = os.environ.get("LM_CI_SOURCE_HEAD_SHA", sha)
@@ -3094,7 +3102,7 @@ def main() -> int:
         verify_pinned_tree_inventory(sha, phase="after-startup")
         verify_guest_cannot_read_escape()
         with _timed_ci_stage("production_terminal_regression"):
-            TERMINAL_GATE.run_production_terminal_acceptance(REPO, CI_INSTALL_PREFIX, sha)
+            invoke_production_terminal_acceptance()
         with _timed_ci_stage("forced_stop_recovery"):
             force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation

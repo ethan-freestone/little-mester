@@ -46,6 +46,28 @@ class TerminalGateError(RuntimeError):
     """A required production-terminal assertion failed or was unavailable."""
 
 
+_CREDENTIAL_CHECKS = frozenset({
+    "control_group_lookup", "control_group_id", "effective_control_group",
+    "effective_runner_uid",
+    "runtime_directory_lstat", "runtime_directory_metadata",
+    "control_key_lstat", "control_key_metadata",
+    "known_hosts_lstat", "known_hosts_metadata",
+    "host_tool_git", "host_tool_sg", "host_tool_ssh", "host_tool_sudo",
+    "host_tool_systemctl", "host_tool_infocmp", "host_tool_python3",
+    "xterm_terminfo_probe", "xterm_terminfo_entry", "python_pexpect",
+})
+
+
+class CredentialPreflightError(TerminalGateError):
+    """A fixed, secret-free credential preflight subcheck failed."""
+
+    def __init__(self, check: str):
+        if not isinstance(check, str) or check not in _CREDENTIAL_CHECKS:
+            raise TerminalGateError("invalid credential diagnostic code")
+        self.check = check
+        super().__init__("credential preflight failed")
+
+
 class GateStop(Exception):
     """Stop unsafe dependent actions while retaining required skipped checks."""
 
@@ -139,6 +161,31 @@ def _run(argv: list[str], *, timeout: int = 10) -> subprocess.CompletedProcess:
                           stderr=subprocess.DEVNULL, timeout=timeout, check=False)
 
 
+def verify_host_terminal_tools() -> dict:
+    """Check predictable terminal-gate host requirements without VM credentials."""
+    tools = (
+        ("host_tool_git", "/usr/bin/git"), ("host_tool_sg", "/usr/bin/sg"),
+        ("host_tool_ssh", "/usr/bin/ssh"), ("host_tool_sudo", "/usr/bin/sudo"),
+        ("host_tool_systemctl", "/usr/bin/systemctl"),
+        ("host_tool_infocmp", "/usr/bin/infocmp"),
+        ("host_tool_python3", "/usr/bin/python3"),
+    )
+    for check, tool in tools:
+        if not (os.path.isfile(tool) and os.access(tool, os.X_OK)):
+            raise CredentialPreflightError(check)
+    try:
+        terminfo = _run(["/usr/bin/infocmp", "-1", "xterm-256color"])
+    except (OSError, subprocess.SubprocessError):
+        raise CredentialPreflightError("xterm_terminfo_probe") from None
+    if terminfo.returncode != 0:
+        raise CredentialPreflightError("xterm_terminfo_entry")
+    try:
+        import pexpect  # noqa: F401
+    except ImportError:
+        raise CredentialPreflightError("python_pexpect") from None
+    return {"host_tools": "available", "host_terminal": "xterm-256color"}
+
+
 def verify_hosted_prerequisites(repo: pathlib.Path, env: dict[str, str] | None = None) -> dict:
     """Reject local runs, non-hosted runners, and missing disposable KVM."""
     env = os.environ if env is None else env
@@ -229,38 +276,48 @@ def verify_installed_candidate(repo: pathlib.Path, prefix: pathlib.Path,
 
 
 def verify_credentials_and_host_tools() -> dict:
-    """Validate protected SSH access and terminal prerequisites without reading keys."""
+    """Validate protected SSH access in the authorized group context without reading keys."""
     uid = os.getuid()
-    username = pwd.getpwuid(uid).pw_name
-    group = grp.getgrnam("lm-vm-control")
-    _require(group.gr_gid > 0 and (username in group.gr_mem or group.gr_gid in os.getgroups()
-                                   or group.gr_gid == os.getegid()),
-             "runner is not an authorized lm-vm-control member")
-    runtime = pathlib.Path(f"/run/user/{uid}")
-    info = os.lstat(runtime)
-    _require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
-             and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700,
-             "runner private runtime directory is unavailable")
-    assets = ((pathlib.Path("/etc/little-mester-vm/control_ed25519"), 0, group.gr_gid, 0o640),
-              (pathlib.Path("/etc/little-mester-vm/known_hosts"), 0, 0, 0o644))
-    for path, owner, gid, mode in assets:
-        info = os.lstat(path)
-        _require(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
-                 and info.st_uid == owner and info.st_gid == gid
-                 and stat.S_IMODE(info.st_mode) == mode and info.st_nlink == 1,
-                 "fixed guest SSH credential metadata is unavailable or unsafe")
-    for tool in ("/usr/bin/git", "/usr/bin/sg", "/usr/bin/ssh", "/usr/bin/sudo",
-                 "/usr/bin/systemctl", "/usr/bin/infocmp", "/usr/bin/python3"):
-        _require(os.path.isfile(tool) and os.access(tool, os.X_OK),
-                 "a fixed host terminal or SSH prerequisite is unavailable")
-    terminfo = _run(["/usr/bin/infocmp", "-1", "xterm-256color"])
-    _require(terminfo.returncode == 0, "xterm-256color terminfo is unavailable")
     try:
-        import pexpect  # noqa: F401
-    except ImportError as error:
-        raise TerminalGateError("Python pexpect is required on the hosted runner") from error
-    return {"credential_files": "metadata-verified-not-read",
-            "host_tools": "available", "host_terminal": "xterm-256color"}
+        group = grp.getgrnam("lm-vm-control")
+    except (KeyError, OSError):
+        raise CredentialPreflightError("control_group_lookup") from None
+    if group.gr_gid <= 0:
+        raise CredentialPreflightError("control_group_id")
+    if os.geteuid() != uid:
+        raise CredentialPreflightError("effective_runner_uid")
+    try:
+        effective_groups = os.getgroups()
+        effective_gid = os.getegid()
+    except OSError:
+        raise CredentialPreflightError("effective_control_group") from None
+    if group.gr_gid not in effective_groups and group.gr_gid != effective_gid:
+        raise CredentialPreflightError("effective_control_group")
+    runtime = pathlib.Path(f"/run/user/{uid}")
+    try:
+        info = os.lstat(runtime)
+    except OSError:
+        raise CredentialPreflightError("runtime_directory_lstat") from None
+    if not (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700):
+        raise CredentialPreflightError("runtime_directory_metadata")
+    assets = (
+        ("control_key", pathlib.Path("/etc/little-mester-vm/control_ed25519"),
+         0, group.gr_gid, 0o640),
+        ("known_hosts", pathlib.Path("/etc/little-mester-vm/known_hosts"),
+         0, 0, 0o644),
+    )
+    for name, path, owner, gid, mode in assets:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            raise CredentialPreflightError(f"{name}_lstat") from None
+        if not (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and info.st_uid == owner and info.st_gid == gid
+                and stat.S_IMODE(info.st_mode) == mode and info.st_nlink == 1):
+            raise CredentialPreflightError(f"{name}_metadata")
+    host = verify_host_terminal_tools()
+    return {"credential_files": "metadata-verified-not-read", **host}
 
 
 def _clean_tui_environment() -> dict[str, str]:
@@ -559,6 +616,10 @@ class ProductionTerminalGate:
             if details is None:
                 details = {}
             _require(isinstance(details, dict), "invalid terminal check result")
+        except CredentialPreflightError as error:
+            self.ledger.check(name, False, reason=error.check)
+            print(f"production_terminal_credential=FAIL check={error.check}", flush=True)
+            raise GateStop(name) from None
         except Exception as error:  # noqa: BLE001 - only exception class enters private evidence
             self.ledger.check(name, False, reason=type(error).__name__)
             raise GateStop(name) from None
@@ -1063,6 +1124,15 @@ def run_production_terminal_acceptance(repo: pathlib.Path, prefix: pathlib.Path,
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--host-preflight"]:
+        try:
+            verify_host_terminal_tools()
+        except CredentialPreflightError as error:
+            print(f"production_terminal_preflight=FAIL check={error.check}", flush=True)
+            return 1
+        print("production_terminal_preflight=PASS checks=host_tools", flush=True)
+        return 0
+    _require(not sys.argv[1:], "unsupported argument")
     sha = os.environ.get("GITHUB_SHA", "")
     try:
         run_production_terminal_acceptance(REPO, DEFAULT_INSTALL_PREFIX, sha)

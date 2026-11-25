@@ -60,6 +60,31 @@ class EvidenceLedgerTests(unittest.TestCase):
             ))
             self.assertLessEqual(ledger.bytes_written, gate.EVIDENCE_MAX_BYTES)
 
+    def test_credential_failure_reports_only_a_fixed_prerequisite_code(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = gate.EvidenceLedger(pathlib.Path(temp), "a" * 40)
+            instance = gate.ProductionTerminalGate(
+                ROOT, pathlib.Path("/srv/little-mester-ci"), "a" * 40, ledger, env={})
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(gate.GateStop):
+                instance._must(
+                    "credentials",
+                    lambda: (_ for _ in ()).throw(
+                        gate.CredentialPreflightError("control_key_lstat")))
+            ledger.close()
+
+            self.assertIn(
+                "production_terminal_credential=FAIL check=control_key_lstat",
+                output.getvalue())
+            self.assertNotIn("/etc/little-mester-vm", output.getvalue())
+            records = [json.loads(line) for line in ledger.path.read_text().splitlines()]
+            self.assertEqual(records[1]["reason"], "control_key_lstat")
+
+    def test_credential_diagnostic_rejects_unlisted_or_sensitive_values(self):
+        for value in ("/etc/little-mester-vm/control_ed25519", "token=secret"):
+            with self.subTest(value=value), self.assertRaises(gate.TerminalGateError):
+                gate.CredentialPreflightError(value)
+
     def test_ledger_rejects_unbounded_or_unknown_check_records(self):
         with tempfile.TemporaryDirectory() as temp:
             ledger = gate.EvidenceLedger(pathlib.Path(temp), "b" * 40)
@@ -99,6 +124,66 @@ class HostedGuardTests(unittest.TestCase):
               self.assertRaisesRegex(gate.TerminalGateError, "candidate checkout")):
             gate.verify_hosted_prerequisites(ROOT, env=env)
 
+
+class CredentialPreflightTests(unittest.TestCase):
+    def test_database_group_membership_does_not_substitute_for_effective_access(self):
+        group = SimpleNamespace(gr_gid=42, gr_mem=["runner"])
+        with mock.patch.object(gate.os, "getuid", return_value=1001), \
+             mock.patch.object(gate.os, "geteuid", return_value=1001), \
+             mock.patch.object(gate.grp, "getgrnam", return_value=group), \
+             mock.patch.object(gate.os, "getgroups", return_value=[]), \
+             mock.patch.object(gate.os, "getegid", return_value=100), \
+             mock.patch.object(gate.os, "lstat") as lstat, \
+             self.assertRaises(gate.CredentialPreflightError) as raised:
+            gate.verify_credentials_and_host_tools()
+
+        self.assertEqual(raised.exception.check, "effective_control_group")
+        lstat.assert_not_called()
+
+    def test_key_traversal_failure_has_a_fixed_preflight_code(self):
+        group = SimpleNamespace(gr_gid=42)
+        runtime = SimpleNamespace(st_mode=gate.stat.S_IFDIR | 0o700, st_uid=1001)
+        with mock.patch.object(gate.os, "getuid", return_value=1001), \
+             mock.patch.object(gate.os, "geteuid", return_value=1001), \
+             mock.patch.object(gate.grp, "getgrnam", return_value=group), \
+             mock.patch.object(gate.os, "getgroups", return_value=[42]), \
+             mock.patch.object(gate.os, "getegid", return_value=100), \
+             mock.patch.object(gate.os, "lstat",
+                               side_effect=[runtime, PermissionError("sensitive detail")]), \
+             self.assertRaises(gate.CredentialPreflightError) as raised:
+            gate.verify_credentials_and_host_tools()
+
+        self.assertEqual(raised.exception.check, "control_key_lstat")
+        self.assertEqual(str(raised.exception), "credential preflight failed")
+
+    def test_root_effective_uid_cannot_substitute_for_runner_identity(self):
+        with mock.patch.object(gate.os, "getuid", return_value=1001), \
+             mock.patch.object(gate.os, "geteuid", return_value=0), \
+             mock.patch.object(gate.grp, "getgrnam",
+                               return_value=SimpleNamespace(gr_gid=42)), \
+             mock.patch.object(gate.os, "lstat") as lstat, \
+             self.assertRaises(gate.CredentialPreflightError) as raised:
+            gate.verify_credentials_and_host_tools()
+
+        self.assertEqual(raised.exception.check, "effective_runner_uid")
+        lstat.assert_not_called()
+
+
+class HostTerminalPreflightTests(unittest.TestCase):
+    def test_host_prerequisite_failure_emits_only_fixed_id(self):
+        output = io.StringIO()
+        with mock.patch.object(gate.sys, "argv", [str(SCRIPT), "--host-preflight"]), \
+             mock.patch.object(gate, "verify_host_terminal_tools",
+                               side_effect=gate.CredentialPreflightError("python_pexpect")), \
+             contextlib.redirect_stdout(output):
+            result = gate.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(),
+                         "production_terminal_preflight=FAIL check=python_pexpect\n")
+
+
+class CandidatePreflightTests(unittest.TestCase):
     def test_candidate_requires_exact_sha_clean_checkout_and_matching_cli_blobs(self):
         sha = "c" * 40
         with tempfile.TemporaryDirectory() as temp:
@@ -392,10 +477,11 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_live_gate_runs_after_shared_acceptance_and_before_forced_stop(self):
         source = (ROOT / "tests/ci-kvm-system-unit.py").read_text()
         main = source[source.index("def main()") :]
-        self.assertIn("TERMINAL_GATE.run_production_terminal_acceptance", source)
+        self.assertIn("def invoke_production_terminal_acceptance()", source)
+        self.assertIn("invoke_production_terminal_acceptance()", main)
         self.assertLess(main.index("invoke_shared_acceptance(sha)"),
-                        main.index("run_production_terminal_acceptance"))
-        self.assertLess(main.index("run_production_terminal_acceptance"),
+                        main.index("invoke_production_terminal_acceptance()"))
+        self.assertLess(main.index("invoke_production_terminal_acceptance()"),
                         main.index("force_systemd_fallback(installed_root)"))
         self.assertIn('"production_terminal_regression"', main)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

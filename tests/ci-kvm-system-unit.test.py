@@ -780,6 +780,43 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn(f"/tools/vm-owner-acceptance --system-vm accept", command[3])
         self.assertIn("--approve-system-vm-lifecycle", command[3])
 
+    def test_ci_runs_terminal_gate_in_effective_control_group_without_fallback(self):
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_production_terminal_acceptance()
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/sg", "lm-vm-control", "-c"])
+        self.assertEqual(command[3], "exec " + shlex.join([
+            "/usr/bin/python3", str(unit.REPO / "tests/ci-kvm-production-terminal.py")]))
+        self.assertEqual(run.call_args.kwargs["timeout"], 45 * 60)
+        self.assertFalse(run.call_args.kwargs["capture"])
+
+        with mock.patch.object(unit, "run", side_effect=RuntimeError("sg denied")) as run:
+            with self.assertRaisesRegex(RuntimeError, "sg denied"):
+                unit.invoke_production_terminal_acceptance()
+        run.assert_called_once()
+
+        source = SCRIPT.read_text()
+        main = source[source.index("def main()") :]
+        self.assertIn("invoke_production_terminal_acceptance()", main)
+        self.assertNotIn("run_production_terminal_acceptance(REPO", main)
+
+    def test_ci_checks_terminal_host_tools_before_candidate_install(self):
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_production_terminal_host_preflight()
+
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/python3", str(unit.REPO / "tests/ci-kvm-production-terminal.py"),
+            "--host-preflight",
+        ])
+        self.assertEqual(run.call_args.kwargs["timeout"], 15)
+        self.assertFalse(run.call_args.kwargs["capture"])
+
+        source = SCRIPT.read_text()
+        main = source[source.index("def main()") :]
+        self.assertLess(main.index("invoke_production_terminal_host_preflight()"),
+                        main.index('with _timed_ci_stage("candidate_install")'))
+
     def test_fresh_production_install_configures_disposable_host_source_before_real_unit_start(self):
         source = SCRIPT.read_text()
         configure = source.index("def configure_disposable_workspace")
