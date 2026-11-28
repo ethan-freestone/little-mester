@@ -39,6 +39,7 @@ WORKSPACE_UNIT = "little-mester-vm-workspace.service"
 METRICS_UNIT = "little-mester-vm-metrics.service"
 PINNED_INSTALL_ASSETS = {
     "/usr/lib/little-mester-vm/system-vm.py": ("lib/vm/system-vm.py", 0o644),
+    "/usr/lib/little-mester-vm/vm-instance.py": ("lib/vm/vm-instance.py", 0o644),
     "/usr/lib/little-mester-vm/system-vm-workspace.py":
         ("lib/vm/system-vm-workspace.py", 0o644),
     "/usr/lib/little-mester-vm/parent-qemu.py": ("lib/vm/parent-qemu.py", 0o644),
@@ -74,7 +75,20 @@ PINNED_INSTALL_ASSETS = {
         ("agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts", 0o644),
     "/etc/sudoers.d/little-mester-vm": ("sudoers/little-mester-vm", 0o440),
 }
-PINNED_SOURCE_PATHS = frozenset(source for source, _mode in PINNED_INSTALL_ASSETS.values())
+PROFILE_CONTROL_INSTALL_ASSETS = {
+    "/usr/libexec/little-mester-vm/profile-control":
+        ("lib/vm/profile-control.py", 0o755),
+    "/etc/sudoers.d/little-mester-vm-profile-control":
+        ("sudoers/little-mester-vm-profile-control", 0o440),
+}
+CI_SUDOERS_PATHS = frozenset({
+    "/etc/sudoers.d/little-mester-vm",
+    "/etc/sudoers.d/little-mester-vm-profile-control",
+})
+PINNED_SOURCE_PATHS = (
+    frozenset(source for source, _mode in PINNED_INSTALL_ASSETS.values())
+    | frozenset(source for source, _mode in PROFILE_CONTROL_INSTALL_ASSETS.values())
+)
 FIXED_FILES = (
     "/etc/systemd/system/little-mester-vm.service",
     "/etc/systemd/system/little-mester-vm-proxy.service",
@@ -100,30 +114,92 @@ FIXED_GROUPS = ("lm-vm", "lm-vm-proxy", "lm-vm-control")
 PROTECTED_PREFLIGHT_PATH = "/etc/sudoers.d/little-mester-vm"
 DIAGNOSTIC_CAPTURE_LIMIT = 256 * 1024
 DIAGNOSTIC_OUTPUT_LIMIT = 24 * 1024
-PROTECTED_PREFLIGHT_CHECK = (
-    "import os, sys\n"
+PROTECTED_LSTAT_SCRIPT = (
+    "import json, os, sys\n"
     "try:\n"
-    "    os.lstat(sys.argv[1])\n"
+    "    info = os.lstat(sys.argv[1])\n"
     "except FileNotFoundError:\n"
-    "    raise SystemExit(1)\n"
-    "except OSError:\n"
+    "    raise SystemExit(3)\n"
+    "except OSError as error:\n"
+    "    print(f'{type(error).__name__}: {error}', file=sys.stderr)\n"
     "    raise SystemExit(2)\n"
+    "print(json.dumps({'mode': info.st_mode, 'uid': info.st_uid, 'gid': info.st_gid, "
+    "'nlink': info.st_nlink, 'size': info.st_size, 'device': info.st_dev, "
+    "'inode': info.st_ino}))\n"
+)
+PROTECTED_READ_SCRIPT = (
+    "import os, stat, sys\n"
+    "limit = int(sys.argv[2])\n"
+    "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+    "try:\n"
+    "    info = os.fstat(fd)\n"
+    "    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:\n"
+    "        raise SystemExit('protected file is not a bounded regular file')\n"
+    "    data = bytearray()\n"
+    "    while True:\n"
+    "        block = os.read(fd, min(65536, limit + 1 - len(data)))\n"
+    "        if not block: break\n"
+    "        data.extend(block)\n"
+    "        if len(data) > limit:\n"
+    "            raise SystemExit('protected file exceeds its read bound')\n"
+    "    sys.stdout.buffer.write(data)\n"
+    "finally:\n"
+    "    os.close(fd)\n"
 )
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def run(argv: list[str], *, timeout: int = 30, check: bool = True,
-        capture: bool = True) -> subprocess.CompletedProcess:
+        capture: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     result = subprocess.run(
         argv, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
-        text=True, timeout=timeout, check=False,
+        text=True, timeout=timeout, check=False, env=env,
     )
     if check and result.returncode:
         detail = (result.stderr or "").strip()[-1200:]
         raise RuntimeError(f"command failed ({result.returncode}): {argv[0]} {detail}")
     return result
+
+
+def protected_path_lstat(path: pathlib.Path | str) -> dict[str, int] | None:
+    """Inspect protected path metadata with a fixed read-only root probe."""
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+         PROTECTED_LSTAT_SCRIPT, str(path)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=10, check=False)
+    if result.returncode == 3:
+        return None
+    if result.returncode != 0:
+        raise RuntimeError(f"privileged path inspection failed for {pathlib.Path(path).name}: "
+                           f"{result.stderr.strip()}")
+    try:
+        info = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("privileged path inspection returned malformed metadata") from error
+    fields = {"mode", "uid", "gid", "nlink", "size", "device", "inode"}
+    require(isinstance(info, dict) and set(info) == fields
+            and all(type(value) is int for value in info.values()),
+            "privileged path inspection returned an unsupported metadata record")
+    return info
+
+
+def protected_file_bytes(path: pathlib.Path | str, *, limit: int) -> bytes:
+    """Read one bounded protected regular file without following its final path."""
+    require(type(limit) is int and 0 < limit <= 2 * 1024 * 1024,
+            "protected file read limit is outside its fixed bound")
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+         PROTECTED_READ_SCRIPT, str(path), str(limit)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=10, check=False)
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"privileged bounded read failed for {pathlib.Path(path).name}: {detail}")
+    require(len(result.stdout) <= limit, "privileged protected-file read exceeded its fixed bound")
+    return result.stdout
 
 
 def _bounded_process_evidence(result: subprocess.CompletedProcess) -> dict[str, object]:
@@ -286,15 +362,11 @@ def fixed_name_preflight(*, paths: tuple[str, ...] = FIXED_FILES,
     for raw in paths:
         path = pathlib.Path(raw)
         if raw == PROTECTED_PREFLIGHT_PATH:
-            result = subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
-                 PROTECTED_PREFLIGHT_CHECK, PROTECTED_PREFLIGHT_PATH],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=5, check=False,
-            )
-            require(result.returncode in (0, 1),
-                    f"unable to safely inspect fixed system VM path: {raw}")
-            require(result.returncode == 1,
+            try:
+                info = protected_path_lstat(path)
+            except RuntimeError as error:
+                raise RuntimeError(f"unable to safely inspect fixed system VM path: {raw}") from error
+            require(info is None,
                     f"preserving pre-existing fixed system VM path: {raw}")
             continue
         require(not path.exists() and not path.is_symlink(),
@@ -436,6 +508,9 @@ def sanitize_diagnostic_output(value: str) -> str:
                     re.DOTALL), "[REDACTED PRIVATE KEY BLOCK]"),
         (re.compile(r"-----BEGIN [^\r\n]*PRIVATE KEY-----.*\Z", re.DOTALL),
          "[REDACTED INCOMPLETE PRIVATE KEY BLOCK]"),
+        (re.compile(r"(?m)\bssh-(?:ed25519|rsa|ecdsa-[A-Za-z0-9-]+)\s+"
+                    r"[A-Za-z0-9+/]{32,}={0,2}(?:\s+[^\r\n]+)?"),
+         "[REDACTED SSH KEY]"),
         (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
         (re.compile(r"(?im)\b(password|passwd|token|secret|authorization|api[_-]?key)"
                     r"\b(\s*[=:]\s*)(?:\".*?\"|'.*?'|[^\r\n,;]*)", re.DOTALL),
@@ -2518,19 +2593,58 @@ def expected_installed_bytes(sha: str, source: str) -> bytes:
     return payload
 
 
+def verify_installed_asset(sha: str, destination: str, source: str, mode: int,
+                          *, protected: bool = False) -> None:
+    expected = expected_installed_bytes(sha, source)
+    if protected:
+        require(PROFILE_CONTROL_INSTALL_ASSETS.get(destination) == (source, mode),
+                f"untrusted protected installed asset path: {destination}")
+        info = protected_path_lstat(destination)
+        require(info is not None and stat.S_ISREG(info["mode"])
+                and info["uid"] == 0 and info["gid"] == 0
+                and stat.S_IMODE(info["mode"]) == mode and info["nlink"] == 1,
+                f"protected installed asset metadata mismatch: {destination}")
+        installed = protected_file_bytes(destination, limit=2 * 1024 * 1024)
+    else:
+        installed_mode, installed_uid = installed_asset_metadata(destination)
+        require(stat.S_ISREG(installed_mode) and installed_uid == 0
+                and stat.S_IMODE(installed_mode) == mode,
+                f"installed production asset metadata mismatch: {destination}")
+        installed = installed_asset_bytes(destination)
+    require(installed == expected,
+            f"installed production asset bytes differ from exact candidate: {destination}")
+
+
+def verify_sudoers_file(destination: str) -> None:
+    require(destination in CI_SUDOERS_PATHS, f"untrusted CI sudoers path: {destination}")
+    run(["/usr/bin/sudo", "-n", "/usr/sbin/visudo", "-cf", destination])
+
+
+def verify_profile_control_assets(sha: str) -> None:
+    """Verify signed profile outputs through shared protected-path CI primitives."""
+    for destination, (source, mode) in PROFILE_CONTROL_INSTALL_ASSETS.items():
+        verify_installed_asset(sha, destination, source, mode, protected=True)
+    verify_sudoers_file("/etc/sudoers.d/little-mester-vm-profile-control")
+    print("profile_control_install=PASS pinned_bytes=true sudoers=PASS")
+
+
+def install_pinned_candidate(sha: str, *, timeout: int = 120,
+                            command_runner=None) -> subprocess.CompletedProcess:
+    """Install one exact owner candidate through the shared CI command path."""
+    require(SHA_RE.fullmatch(sha) is not None, "candidate install requires a full exact commit SHA")
+    command_runner = run if command_runner is None else command_runner
+    return command_runner(
+        [str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
+         "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)],
+        timeout=timeout)
+
+
 def verify_installed_files() -> None:
     sha = os.environ.get("GITHUB_SHA", "")
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
     for dest, (source, mode) in PINNED_INSTALL_ASSETS.items():
-        installed_mode, installed_uid = installed_asset_metadata(dest)
-        require(stat.S_ISREG(installed_mode) and installed_uid == 0
-                and stat.S_IMODE(installed_mode) == mode,
-                f"installed production asset metadata mismatch: {dest}")
-        installed = installed_asset_bytes(dest)
-        require(installed == expected_installed_bytes(sha, source),
-                f"installed production asset bytes differ from exact candidate: {dest}")
-    run(["/usr/bin/sudo", "-n", "/usr/sbin/visudo", "-cf",
-         "/etc/sudoers.d/little-mester-vm"])
+        verify_installed_asset(sha, dest, source, mode)
+    verify_sudoers_file("/etc/sudoers.d/little-mester-vm")
     print("production_unit_install=PASS pinned_bytes=true sudoers=PASS")
 
 
@@ -3040,8 +3154,7 @@ def main() -> int:
                 and stat.S_IMODE(runtime_info.st_mode) == 0o700,
                 "runner private runtime path is unsafe")
         with _timed_ci_stage("candidate_install"):
-            run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
-                 "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)], timeout=120)
+            install_pinned_candidate(sha)
         installed_root = CI_INSTALL_PARENT / sha
         with _timed_ci_stage("fresh_provisioning"):
             run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)

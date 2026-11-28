@@ -1,0 +1,550 @@
+{
+  "$id": "https://little-mester.invalid/vm/profile-mapping-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "accounts": {
+      "additionalProperties": false,
+      "properties": {
+        "proxy": {
+          "additionalProperties": false,
+          "properties": {
+            "gid": {
+              "maximum": 999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "name": {
+              "pattern": "^[a-z][a-z0-9-]{0,31}$",
+              "type": "string"
+            },
+            "uid": {
+              "maximum": 999,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "uid",
+            "gid"
+          ],
+          "type": "object"
+        },
+        "vm": {
+          "additionalProperties": false,
+          "properties": {
+            "gid": {
+              "maximum": 999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "name": {
+              "pattern": "^[a-z][a-z0-9-]{0,31}$",
+              "type": "string"
+            },
+            "uid": {
+              "maximum": 999,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "uid",
+            "gid"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "vm",
+        "proxy"
+      ],
+      "type": "object"
+    },
+    "base": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "const": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+        }
+      },
+      "required": [
+        "source_sha256",
+        "manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "name": {
+      "pattern": "^[a-z][a-z0-9-]{0,31}$",
+      "type": "string"
+    },
+    "owner_uid": {
+      "maximum": 4294967294,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "provisioning": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifacts": {
+              "additionalProperties": false,
+              "properties": {
+                "client_private": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode"
+                  ],
+                  "type": "object"
+                },
+                "client_public": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "disk": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "allocated_bytes": {
+                      "maximum": 68719476735,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "virtual_size": {
+                      "const": 68719476736
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode",
+                    "virtual_size",
+                    "allocated_bytes"
+                  ],
+                  "type": "object"
+                },
+                "host_private": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode"
+                  ],
+                  "type": "object"
+                },
+                "host_public": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "known_hosts": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "seed": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "inode": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "inode",
+                    "sha256"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "disk",
+                "seed",
+                "host_private",
+                "host_public",
+                "client_private",
+                "client_public",
+                "known_hosts"
+              ],
+              "type": "object"
+            },
+            "generation": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "generation",
+            "artifacts"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "resources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpus": {
+          "maximum": 16,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memory_mib": {
+          "maximum": 65536,
+          "minimum": 256,
+          "type": "integer"
+        },
+        "ssh_port": {
+          "maximum": 23220,
+          "minimum": 22223,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpus",
+        "memory_mib",
+        "ssh_port"
+      ],
+      "type": "object"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "helper_api": {
+          "const": 1
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "runtime_api": {
+          "const": 1
+        },
+        "sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "manifest_sha256",
+        "helper_api",
+        "runtime_api"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "state": {
+      "enum": [
+        "installing",
+        "ready",
+        "unprovisioned",
+        "resetting",
+        "removing"
+      ]
+    },
+    "transaction": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "generation": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "mode": {
+                  "enum": [
+                    "fresh",
+                    "reprovision"
+                  ]
+                },
+                "operation": {
+                  "const": "install"
+                },
+                "phase": {
+                  "maxLength": 48,
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "schema_version": {
+                  "const": 2
+                },
+                "transaction_id": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema_version",
+                "operation",
+                "transaction_id",
+                "phase",
+                "mode",
+                "generation"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "generation": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "operation": {
+                  "const": "reset"
+                },
+                "phase": {
+                  "maxLength": 48,
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "schema_version": {
+                  "const": 2
+                },
+                "transaction_id": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema_version",
+                "operation",
+                "transaction_id",
+                "phase",
+                "generation"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "generation": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "operation": {
+                  "const": "remove"
+                },
+                "phase": {
+                  "maxLength": 48,
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "schema_version": {
+                  "const": 2
+                },
+                "transaction_id": {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema_version",
+                "operation",
+                "transaction_id",
+                "phase",
+                "generation"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      ]
+    },
+    "units": {
+      "additionalProperties": false,
+      "properties": {
+        "metrics": {
+          "pattern": "^[A-Za-z0-9_.@:-]+\\.service$",
+          "type": "string"
+        },
+        "proxy": {
+          "pattern": "^[A-Za-z0-9_.@:-]+\\.service$",
+          "type": "string"
+        },
+        "vm": {
+          "pattern": "^[A-Za-z0-9_.@:-]+\\.service$",
+          "type": "string"
+        },
+        "workspace": {
+          "pattern": "^[A-Za-z0-9_.@:-]+\\.service$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vm",
+        "proxy",
+        "workspace",
+        "metrics"
+      ],
+      "type": "object"
+    },
+    "workspace": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "device": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "inode": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mount_id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^/[^\\x00\\r\\n]*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "device",
+            "inode",
+            "mount_id"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "owner_uid",
+    "state",
+    "transaction",
+    "runtime",
+    "base",
+    "resources",
+    "accounts",
+    "units",
+    "workspace",
+    "provisioning"
+  ],
+  "title": "Little Mester protected VM profile mapping v2",
+  "type": "object"
+}

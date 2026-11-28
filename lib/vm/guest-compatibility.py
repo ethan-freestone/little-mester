@@ -17,6 +17,7 @@ import shlex
 
 
 SYSTEM_WORKSPACE = "/workspace"
+DEFAULT_WORKSPACE = "/home/mester/workspace"
 OPENCODE_VERSION = "2.2.5"
 OPENCODE_PACKAGE_JSON = "/usr/local/lib/node_modules/@opencode/cli/package.json"
 MAX_ASSET_BYTES = 1024 * 1024
@@ -39,12 +40,13 @@ def _contract_module():
 
 def expected_inventory(workspace_path: str = SYSTEM_WORKSPACE) -> dict[str, dict]:
     """Return only immutable candidate assets plus the fixed workspace mount."""
-    if workspace_path != SYSTEM_WORKSPACE:
-        raise ValueError("guest compatibility inspection accepts only fixed /workspace")
+    if workspace_path not in (SYSTEM_WORKSPACE, DEFAULT_WORKSPACE):
+        raise ValueError("guest compatibility inspection accepts only fixed VM workspaces")
     contract = _contract_module()
-    assets = contract.assets_for_workspace(SYSTEM_WORKSPACE)
+    assets = contract.assets_for_workspace(workspace_path)
     plugin_assets = dict(contract.PROTECTED_PLUGIN_ASSETS)
-    plugin_assets.update(contract.METRICS_PLUGIN_ASSETS)
+    if workspace_path == SYSTEM_WORKSPACE:
+        plugin_assets.update(contract.METRICS_PLUGIN_ASSETS)
     protected_config = json.dumps(
         {"autoupdate": False, "share": "disabled",
          "permission": {"edit": "ask", "bash": "ask"}},
@@ -102,11 +104,14 @@ def expected_inventory(workspace_path: str = SYSTEM_WORKSPACE) -> dict[str, dict
         "uid": 0,
         "gid": 0,
     }
-    result[SYSTEM_WORKSPACE] = {
-        "kind": "mount",
-        "fstype": "virtiofs",
-        "source": "workspace",
-    }
+    if workspace_path == SYSTEM_WORKSPACE:
+        result[workspace_path] = {
+            "kind": "mount", "fstype": "virtiofs", "source": "workspace",
+        }
+    else:
+        result[workspace_path] = {
+            "kind": "disk-directory", "fstype": "disk-directory", "source": "root",
+        }
     return result
 
 
@@ -114,7 +119,7 @@ _REMOTE_PROGRAM = r'''import hashlib,json,os,stat
 MAX_FILE_BYTES=1048576
 PATHS=__PATHS__
 VERSION_PATH=__VERSION_PATH__
-WORKSPACE="/workspace"
+WORKSPACE=__WORKSPACE__
 def safe_open(path):
     parts=path.lstrip("/").split("/")
     fd=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -169,8 +174,30 @@ def inspect(path,version=False):
         return result
     finally:
         os.close(fd)
+def mount_id(fd):
+    with open(f"/proc/self/fdinfo/{fd}", encoding="ascii") as source:
+        for line in source:
+            if line.startswith("mnt_id:"): return int(line.split()[1])
+    raise OSError("mount identity unavailable")
 def mount_info():
     try:
+        if WORKSPACE != "/workspace":
+            root_fd=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            fd=root_fd
+            try:
+                for part in WORKSPACE.lstrip("/").split("/"):
+                    nextfd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                    if fd!=root_fd: os.close(fd)
+                    fd=nextfd
+                info=os.fstat(fd)
+                if info.st_uid!=1000 or stat.S_IMODE(info.st_mode)!=0o750:
+                    return {"path":WORKSPACE,"fstype":"directory-mismatch","source":""}
+                if info.st_dev!=os.fstat(root_fd).st_dev or mount_id(fd)!=mount_id(root_fd):
+                    return {"path":WORKSPACE,"fstype":"different-filesystem","source":""}
+                return {"path":WORKSPACE,"fstype":"disk-directory","source":"root"}
+            finally:
+                if fd!=root_fd: os.close(fd)
+                os.close(root_fd)
         with open("/proc/self/mountinfo","rb") as source:
             data=source.read(65537)
         if len(data)>65536: return {"path":WORKSPACE,"fstype":"unavailable","source":""}
@@ -194,12 +221,14 @@ print(json.dumps({"schema":1,"inventory":inventory,"mount":mount_info()},
 
 def build_inspection_command(workspace_path: str = SYSTEM_WORKSPACE) -> str:
     """Build a constant, no-argument remote Python inspection command."""
-    if workspace_path != SYSTEM_WORKSPACE:
-        raise ValueError("guest compatibility inspection accepts only fixed /workspace")
-    expected = expected_inventory(SYSTEM_WORKSPACE)
-    paths = sorted(path for path, item in expected.items() if item["kind"] != "mount")
+    if workspace_path not in (SYSTEM_WORKSPACE, DEFAULT_WORKSPACE):
+        raise ValueError("guest compatibility inspection accepts only fixed VM workspaces")
+    expected = expected_inventory(workspace_path)
+    paths = sorted(path for path, item in expected.items()
+                   if item["kind"] not in ("mount", "disk-directory"))
     program = (_REMOTE_PROGRAM
                .replace("__PATHS__", repr(paths))
+               .replace("__WORKSPACE__", repr(workspace_path))
                .replace("__VERSION_PATH__", repr(OPENCODE_PACKAGE_JSON)))
     return "/usr/bin/python3 -I -c " + shlex.quote(program)
 
@@ -229,7 +258,10 @@ def classify_inventory(stdout: bytes, expected: dict[str, dict], *,
             or not isinstance(document.get("mount"), dict)):
         return "INCONCLUSIVE", ("response-schema",)
 
-    expected_assets = {path: item for path, item in expected.items() if item.get("kind") != "mount"}
+    expected_assets = {
+        path: item for path, item in expected.items()
+        if item.get("kind") not in ("mount", "disk-directory")
+    }
     observed = document["inventory"]
     expected_paths, observed_paths = set(expected_assets), set(observed)
     if observed_paths - expected_paths:
@@ -267,11 +299,13 @@ def classify_inventory(stdout: bytes, expected: dict[str, dict], *,
     if set(mount) != {"path", "fstype", "source"} or not all(
             isinstance(mount.get(key), str) for key in ("path", "fstype", "source")):
         return "INCONCLUSIVE", ("mount-response-invalid",)
-    expected_mount = expected.get(SYSTEM_WORKSPACE)
-    if not isinstance(expected_mount, dict) or expected_mount.get("kind") != "mount":
-        return "INCONCLUSIVE", ("candidate-mount-contract-invalid",)
-    if (mount.get("path") != SYSTEM_WORKSPACE
-            or any(mount.get(key) != expected_mount.get(key) for key in ("fstype", "source"))):
+    workspace_path, expected_workspace = next(
+        ((path, item) for path, item in expected.items()
+         if item.get("kind") in ("mount", "disk-directory")), (None, None))
+    if not isinstance(expected_workspace, dict):
+        return "INCONCLUSIVE", ("candidate-workspace-contract-invalid",)
+    if (mount.get("path") != workspace_path
+            or any(mount.get(key) != expected_workspace.get(key) for key in ("fstype", "source"))):
         diagnostics.append("workspace-mount:mismatch")
     if diagnostics:
         return "MISMATCH", tuple(diagnostics[:32])
@@ -324,7 +358,8 @@ def _evidence_package(inventory: dict, wanted: dict) -> str:
             f"category={category}")
 
 
-def _evidence_mount(mount: dict, wanted: dict) -> str:
+def _evidence_mount(mount: dict, wanted: dict,
+                    workspace_path: str = SYSTEM_WORKSPACE) -> str:
     if not isinstance(mount, dict) or set(mount) != {"path", "fstype", "source"}:
         return "record=unknown,fstype=unknown,source=unknown,category=invalid-observation"
 
@@ -335,7 +370,7 @@ def _evidence_mount(mount: dict, wanted: dict) -> str:
     if fstype == "unavailable":
         return "record=unknown,fstype=unavailable,source=unknown,category=unavailable"
     if fstype == "missing":
-        record = "no" if path == SYSTEM_WORKSPACE else "unknown"
+        record = "no" if path == workspace_path else "unknown"
         source_label = "empty" if source == "" else "other"
         category = "missing" if record == "no" else "invalid-observation"
         return f"record={record},fstype=missing,source={source_label},category={category}"
@@ -347,7 +382,7 @@ def _evidence_mount(mount: dict, wanted: dict) -> str:
         safe_source = "empty"
     else:
         safe_source = "other"
-    record = "yes" if path == SYSTEM_WORKSPACE else "no"
+    record = "yes" if path == workspace_path else "no"
     valid_fields = bool(_SAFE_FSTYPE.fullmatch(fstype))
     matches = (record == "yes" and valid_fields
                and fstype == wanted.get("fstype")
@@ -357,9 +392,11 @@ def _evidence_mount(mount: dict, wanted: dict) -> str:
 
 
 def format_failure_evidence(stdout: bytes, expected: dict[str, dict], *,
-                            cloud_init_ready_wait_ms: int | None = None) -> str:
+                            cloud_init_ready_wait_ms: int | None = None,
+                            workspace_path: str = SYSTEM_WORKSPACE) -> str:
     """Format a bounded, allowlisted summary; never include raw guest response data."""
-    asset_paths = sorted(path for path, item in expected.items() if item.get("kind") != "mount")
+    asset_paths = sorted(path for path, item in expected.items()
+                         if item.get("kind") not in ("mount", "disk-directory"))
     try:
         asset_label = f"asset-{asset_paths.index(OPENCODE_PACKAGE_JSON) + 1}"
     except ValueError:
@@ -372,11 +409,11 @@ def format_failure_evidence(stdout: bytes, expected: dict[str, dict], *,
         f"mode={_evidence_number(wanted_package.get('mode'), maximum=0o7777, mode=True)},"
         f"uid={_evidence_number(wanted_package.get('uid'), maximum=0xFFFFFFFF)},"
         f"gid={_evidence_number(wanted_package.get('gid'), maximum=0xFFFFFFFF)}")
-    wanted_mount = expected.get(SYSTEM_WORKSPACE, {})
+    wanted_mount = expected.get(workspace_path, {})
     expected_mount = (
-        f"record={'yes' if wanted_mount.get('kind') == 'mount' else 'unknown'},"
-        f"fstype={wanted_mount.get('fstype') if wanted_mount.get('fstype') == 'virtiofs' else 'unknown'},"
-        f"source={wanted_mount.get('source') if wanted_mount.get('source') == 'workspace' else 'unknown'}")
+        f"record={'yes' if wanted_mount.get('kind') in ('mount', 'disk-directory') else 'unknown'},"
+        f"fstype={wanted_mount.get('fstype') if isinstance(wanted_mount.get('fstype'), str) else 'unknown'},"
+        f"source={wanted_mount.get('source') if isinstance(wanted_mount.get('source'), str) else 'unknown'}")
 
     response_category = ""
     document = None
@@ -405,7 +442,7 @@ def format_failure_evidence(stdout: bytes, expected: dict[str, dict], *,
                           f"category={response_category}")
     else:
         observed_package = _evidence_package(document["inventory"], wanted_package)
-        observed_mount = _evidence_mount(document["mount"], wanted_mount)
+        observed_mount = _evidence_mount(document["mount"], wanted_mount, workspace_path)
 
     parts = [
         f"Guest compatibility evidence: {asset_label} expected{{{expected_package}}} "

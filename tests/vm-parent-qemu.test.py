@@ -4,6 +4,7 @@
 import importlib.util
 import os
 import pathlib
+import tempfile
 import unittest
 
 
@@ -14,6 +15,19 @@ SPEC.loader.exec_module(parent_qemu)
 
 
 class ParentQemuArgvTests(unittest.TestCase):
+    def open_profile_fds(self, root):
+        files = (root / "overlay.qcow2", root / "base.qcow2", root / "seed.iso")
+        for path in files:
+            path.write_bytes(b"fd fixture")
+        files[0].chmod(0o600)
+        files[1].chmod(0o444)
+        files[2].chmod(0o600)
+        return (
+            os.open(files[0], os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC),
+            os.open(files[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            os.open(files[2], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC),
+        )
+
     def test_metrics_mode_is_fixed_at_each_trusted_launch_boundary(self):
         compose = (ROOT / "compose.yaml").read_text()
         agent = compose.split("\n  agent:\n", 1)[1].split("\n  # ───", 1)[0]
@@ -84,6 +98,69 @@ class ParentQemuArgvTests(unittest.TestCase):
                 ssh_port=22222, proxy_port=32128, qmp_socket="/qmp.sock",
                 vm_name="little-mester-system-vm",
                 virtiofs_socket="/run/little-mester-vm-workspace/virtiofs.sock")
+
+    def test_profile_system_argv_uses_explicit_overlay_and_read_only_base_fdsets(self):
+        with tempfile.TemporaryDirectory(prefix="profile-qemu-argv-") as temporary:
+            fds = self.open_profile_fds(pathlib.Path(temporary))
+            fd_numbers = tuple(fds)
+            try:
+                argv = parent_qemu.build_system_qemu_argv(
+                    executable="/usr/bin/qemu-system-x86_64", disk_path=None,
+                    seed_iso=None,
+                    ssh_port=22223, proxy_port=22224,
+                    qmp_socket="/run/little-mester-vm-profiles/dev/qmp.sock",
+                    vm_name="little-mester-profile-dev",
+                    virtiofs_socket="/run/little-mester-vm-profiles/dev/workspace/virtiofs.sock",
+                    disk_fd=fds[0], base_fd=fds[1], seed_fd=fds[2], cpus=2,
+                    memory_mib=4096, metrics_port=22225)
+                self.assertTrue(all(os.get_inheritable(fd) for fd in fds))
+            finally:
+                for fd in fds:
+                    os.close(fd)
+        self.assertEqual(argv[argv.index("-add-fd") + 1],
+                         f"fd={fd_numbers[1]},set=1,opaque=profile-base")
+        second_add = argv.index("-add-fd", argv.index("-add-fd") + 1)
+        self.assertEqual(argv[second_add + 1],
+                         f"fd={fd_numbers[0]},set=2,opaque=profile-overlay")
+        third_add = argv.index("-add-fd", second_add + 1)
+        self.assertEqual(argv[third_add + 1],
+                         f"fd={fd_numbers[2]},set=3,opaque=profile-seed")
+        joined = " ".join(argv)
+        self.assertIn("filename=/dev/fdset/1,read-only=on", joined)
+        self.assertIn("filename=/dev/fdset/2,locking=on,auto-read-only=off", joined)
+        self.assertIn("backing=profile-base-qcow2", joined)
+        self.assertIn("drive=profile-overlay-qcow2", joined)
+        self.assertIn("file=/dev/fdset/3,format=raw,if=none,id=cloud,readonly=on", joined)
+        self.assertIn("TCP:127.0.0.1:22225", joined)
+        self.assertNotIn("/var/lib/little-mester-vm/profiles/dev/vm/disk.qcow2", joined)
+        self.assertEqual(argv[argv.index("-m") + 1], "4096")
+
+    def test_profile_qemu_fd_graph_rejects_partial_or_unsafe_descriptors(self):
+        base = {
+            "executable": "/usr/bin/qemu-system-x86_64", "disk_path": None,
+            "seed_iso": None, "ssh_port": 22223, "proxy_port": 22224,
+            "qmp_socket": "/run/profile/qmp.sock", "vm_name": "profile",
+        }
+        for overlay_fd, base_fd, seed_fd in (
+                (7, None, 9), (None, 8, 9), (7, 7, 9), (2, 8, 9),
+                (True, 8, 9), (7, 8, None)):
+            with self.subTest(overlay_fd=overlay_fd, base_fd=base_fd), self.assertRaises(ValueError):
+                parent_qemu.build_system_qemu_argv(
+                    **base, disk_fd=overlay_fd, base_fd=base_fd, seed_fd=seed_fd)
+        with tempfile.TemporaryDirectory(prefix="profile-qemu-fd-refusal-") as temporary:
+            fds = self.open_profile_fds(pathlib.Path(temporary))
+            try:
+                with self.assertRaisesRegex(ValueError, "must use its verified overlay descriptor"):
+                    parent_qemu.build_system_qemu_argv(
+                        **{**base, "disk_path": "/disk.qcow2"}, disk_fd=fds[0],
+                        base_fd=fds[1], seed_fd=fds[2])
+                with self.assertRaisesRegex(ValueError, "metrics port"):
+                    parent_qemu.build_system_qemu_argv(
+                        **base, virtiofs_socket="/workspace.sock", disk_fd=fds[0],
+                        base_fd=fds[1], seed_fd=fds[2], metrics_port=80)
+            finally:
+                for fd in fds:
+                    os.close(fd)
 
     def test_disk_is_fdset_backed_with_explicit_qcow2_and_writer_locking(self):
         argv = parent_qemu.build_qemu_argv(

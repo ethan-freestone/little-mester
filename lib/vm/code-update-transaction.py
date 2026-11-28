@@ -188,7 +188,7 @@ def publish_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
             if ((current.st_dev, current.st_ino) == (created.st_dev, created.st_ino)
                     and stat.S_ISREG(current.st_mode) and current.st_nlink == 1):
                 os.unlink(temporary)
-                parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
                     os.fsync(parent_fd)
                 finally:

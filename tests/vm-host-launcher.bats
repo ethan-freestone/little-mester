@@ -356,10 +356,17 @@ def workflow_job(name):
             return workflow_text[match.end():end]
     raise AssertionError(f'missing workflow job: {name}')
 job = workflow_job('transient-qemu-integration')
+vm_unit_job = workflow_job('vm-unit-contract')
 diagnostics_job = workflow_job('systemd-namespace-diagnostics')
 production_job = workflow_job('production-systemd-vm-acceptance')
+profile_job = workflow_job('vm-profile-integration')
 session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session-contract.py'
 session_contract_text = session_contract.read_text()
+profile_harness = pathlib.Path(sys.argv[1]).parents[1] / 'tests/ci-kvm-profile.py'
+profile_harness_text = profile_harness.read_text()
+singleton_harness = pathlib.Path(sys.argv[1]).parents[1] / 'tests/ci-kvm-system-unit.py'
+singleton_harness_text = singleton_harness.read_text()
+lab_text = pathlib.Path(sys.argv[1]).parents[1].joinpath('lab').read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
 opencode_readiness_text = opencode_readiness_text.read_text()
 contract_text = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.sh').read_text()
@@ -375,10 +382,11 @@ state = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.py').read_text()
 state_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.test.py').read_text()
 wrapper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-capability.sh').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
-assert 'name: Transient QEMU guest integration' in job
-assert 'name: Production systemd VM acceptance' in production_job
+assert 'name: VM guest integration tests' in job
+assert 'name: VM default instance integration tests' in production_job
+assert 'name: VM profile integration tests' in profile_job
 assert job.count('if:') == 1 and job.count('if: always()') == 1
-assert 'needs:' not in job and 'needs:' not in production_job
+assert 'needs:' not in job and 'needs:' not in production_job and 'needs:' not in profile_job
 assert 'tests/ci-kvm-system-unit.py' not in job
 assert 'steps.smoke_cleanup.outcome' not in production_job
 assert "if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}" in production_job
@@ -390,6 +398,7 @@ assert 'github.event.pull_request.head.sha || github.sha' in production_job
 assert 'pr_merge_commit_second_parent' in production_job and 'source_head_sha=' in production_job
 assert 'timeout-minutes: 90' in job
 assert 'timeout-minutes: 90' in production_job
+assert 'timeout-minutes: 90' in profile_job
 assert 'timeout-minutes: 15' in diagnostics_job
 assert 'python3 tests/ci-kvm-system-unit.py --namespace-diagnostics' in diagnostics_job
 assert 'needs:' not in diagnostics_job
@@ -412,8 +421,8 @@ staged_invocations = [
 positions = [job.index(invocation) for invocation in staged_invocations]
 assert positions == sorted(positions)
 assert 'if: always()' in job
-assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index('Prove final identity-safe cleanup')
-assert 'python3 tests/ci-kvm-oauth-cleanup.test.py' in job
+assert 'scripts/validate python-tests' in vm_unit_job
+assert 'ci-kvm-oauth-cleanup.test.py' not in job
 assert job.count('ci-kvm-stage.sh --stage') == 6
 assert 'LM_CI_STATE_DIR' in job and 'GITHUB_RUN_ATTEMPT' in job
 assert 'little-mester-transient-kvm-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT' in job
@@ -532,15 +541,35 @@ assert 'oauth_cleanup_unproved' in text and 'oauth_evidence_is_clear' in text
 assert 'process_state' in text and "printf '?'" in text
 assert 'runs-on: ubuntu-24.04' in job
 assert 'runs-on: ubuntu-24.04' in production_job
+assert 'runs-on: ubuntu-24.04' in profile_job
 assert 'contents: read' in workflow_text
 assert 'cancel-in-progress: true' in workflow_text
 assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in job
 assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in production_job
+assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in profile_job
 assert 'cache:' not in job
 assert 'cache:' not in production_job
+assert 'cache:' not in profile_job
 assert 'cancel-in-progress: true' in workflow_text
-assert 'concurrency:' not in job and 'concurrency:' not in production_job
+assert 'concurrency:' not in job and 'concurrency:' not in production_job and 'concurrency:' not in profile_job
 assert 'Prove final identity-safe cleanup' not in production_job
+assert 'tests/ci-kvm-profile.py' not in production_job
+assert 'tests/ci-kvm-profile.py' in profile_job
+assert 'Qualify signed named-profile install, KVM boot, SSH, and shutdown' in profile_job
+assert 'Require named profile stopped' in profile_job
+assert 'tests/ci-kvm-profile.py --cleanup' in profile_job
+assert 'tests/ci-kvm-system-unit.py' not in profile_job
+assert 'run: python3 tests/ci-kvm-profile.py' in profile_job
+assert 'bash tests/ci-kvm-host-dependencies.sh update' in profile_job
+assert 'bash tests/ci-kvm-host-dependencies.sh install' in profile_job
+assert "steps.host_dependencies.outcome == 'success'" in profile_job
+assert 'tools/vm-owner-acceptance' in singleton_harness_text
+assert 'SINGLETON_CI.install_pinned_candidate(sha, timeout=180, command_runner=run)' in profile_harness_text
+assert 'CI_INSTALL_PREFIX = SINGLETON_CI.CI_INSTALL_PREFIX' in profile_harness_text
+assert '"--prefix", str(CI_INSTALL_PREFIX)' in profile_harness_text
+assert 'str(candidate / "tools/vm-system-install")' in profile_harness_text
+assert 'profile_host_enrollment=PASS installer=production-vm-system-install' in profile_harness_text
+assert 'profile_args+=(--sha "$profile_sha" --repo "$LAB_DIR" "${profile_prefix[@]}")' in lab_text
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
 assert 'ci_kvm_qemu_args()' in contract_text and '--ci-argv --mode "$mode"' in contract_text
 assert 'build_ci_qemu_argv' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/parent-qemu.py').read_text()

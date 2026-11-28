@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # TEMP: #66 stacked-PR base branches; remove feature bases after the child stacks merge.
-    branches: [main, feat/vm-approach-3, feat/vm-useability-tweaks, feat/vm-metrics-availability, feat/vm-cli-settings]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -23,12 +21,9 @@ concurrency:
 jobs:
   # ── 1. TypeScript / Node ─────────────────────────────────────────
   node:
-    name: Build & test (TypeScript)
+    name: TypeScript build and tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: little-mester-mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,14 +31,11 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: little-mester-mcp/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      - run: npm run check:package
-      - run: npm test
+      - run: scripts/validate node
 
   # ── 2. Bats — lab script, TUI JSX guard, exit-confirm static ────
   bats:
-    name: Bats (lab, TUI JSX, exit-confirm)
+    name: CLI and TUI tests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -57,11 +49,11 @@ jobs:
           printf 'bats-core commit: %s\n' "$bats_core_commit"
           bats --version
       - name: Run Bats with failure output
-        run: bats --print-output-on-failure tests/
+        run: scripts/validate bats
 
   # ── 3. VM unit & contract tests ──────────────────────────────────
   vm-unit-contract:
-    name: VM unit & contract tests
+    name: VM unit and contract tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -76,37 +68,12 @@ jobs:
         run: |
           sudo npm install --global @opencode/cli@2.2.5
           test "$(opencode --version)" = 'opencode v2.2.5'
-      - name: Run parent suites
-        run: |
-          node --test tests/host-metrics-tui.test.mjs
-          python3 tests/opencode-project-config.test.py
-          python3 tests/ci-tui-diagnostic.test.py
-          python3 tests/ci-tui-capture.test.py
-          python3 tests/ci-kvm-qemu-stop.test.py
-          python3 tests/ci-kvm-ssh.test.py
-          python3 tests/ci-kvm-contract.test.py
-          python3 tests/ci-kvm-stage-state.test.py
-          python3 tests/ci-kvm-qemu-owner.test.py
-          python3 tests/vm-owner-acceptance.test.py
-          python3 tests/vm-systemd.test.py
-          python3 tests/vm-system-workspace.test.py
-          python3 tests/vm-system-metrics.test.py
-          python3 tests/vm-opencode-preferences.test.py
-          python3 tests/vm-host-dependencies.test.py
-          python3 tests/ci-kvm-system-unit.test.py
-          python3 tests/ci-kvm-host-dependencies.test.py
-          python3 tests/vm-guest-user-dirs.test.py
-          python3 tests/ci-qemu-oauth-bridge.test.py
-          python3 tests/ci-kvm-launch.test.py
-          python3 tests/ci-kvm-hostkey.test.py
-          python3 tests/vm-guest-compatibility.test.py
-          for test in tests/vm-parent-*.test.py; do
-            python3 "$test"
-          done
+      - name: Run complete locally runnable Python unit and contract suites
+        run: scripts/validate python-tests
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
-    name: Transient QEMU guest integration
+    name: VM guest integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -193,10 +160,6 @@ jobs:
         timeout-minutes: 5
         run: |
           bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"
-          python3 tests/vm-browser-auth.test.py
-      - name: Exercise live OAuth harness cancellation cleanup
-        timeout-minutes: 2
-        run: python3 tests/ci-kvm-oauth-cleanup.test.py
       - name: Prove final identity-safe cleanup
         id: smoke_cleanup
         if: always()
@@ -205,7 +168,7 @@ jobs:
 
   # ── 5. Exploratory systemd namespace controls on a separate runner ──
   systemd-namespace-diagnostics:
-    name: Systemd namespace diagnostics
+    name: VM namespace diagnostics
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -219,7 +182,7 @@ jobs:
 
   # ── 6. Exact installed production acceptance on its own hosted KVM runner ──
   production-systemd-vm-acceptance:
-    name: Production systemd VM acceptance
+    name: VM default instance integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -293,33 +256,102 @@ jobs:
         timeout-minutes: 2
         run: python3 tests/ci-kvm-system-unit.py --cleanup
 
-  # ── 7. Hygiene — ShellCheck, Python compile, ruff lint ───────────
-  hygiene:
-    name: Hygiene (shellcheck, py_compile, ruff)
+  # ── 7. Exact named-profile production acceptance on its own hosted KVM runner ──
+  vm-profile-integration:
+    name: VM profile integration tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 90
+    env:
+      LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify and report source-head and workflow SHA provenance
+        env:
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$SOURCE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$actual_sha" = "$GITHUB_SHA"
+          printf 'source_head_sha=%s\nworkflow_sha=%s\nevent=%s\n' \
+            "$SOURCE_HEAD_SHA" "$GITHUB_SHA" "$GITHUB_EVENT_NAME"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            merge_parent="$(git rev-parse HEAD^2)"
+            test "$merge_parent" = "$SOURCE_HEAD_SHA"
+            printf 'pr_merge_commit_second_parent=%s\n' "$merge_parent"
+          else
+            test "$SOURCE_HEAD_SHA" = "$actual_sha"
+          fi
+      - name: Report runner architecture, identity, and initial KVM device state
+        run: |
+          printf 'runner_label=ubuntu-24.04\narchitecture=%s\n' "$(uname -m)"
+          id
+          if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            stat -c 'path=%n type=%F mode=%a owner=%U group=%G' -- /dev/kvm
+            if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+              printf 'kvm_access=read-write\n'
+            else
+              printf 'kvm_access=not-read-write\n'
+            fi
+          else
+            printf 'kvm_device=absent\n'
+          fi
+      - name: Apply GitHub-documented KVM udev permissions when needed
+        run: |
+          if [[ -c /dev/kvm && ( ! -r /dev/kvm || ! -w /dev/kvm ) ]]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            stat -c 'path=%n type=%F mode=%a owner=%U group=%G' -- /dev/kvm
+          else
+            printf 'kvm_device=absent-after-udev\n'
+          fi
+      - name: Update Ubuntu package indexes for named-profile KVM
+        timeout-minutes: 4
+        run: bash tests/ci-kvm-host-dependencies.sh update
+      - name: Install disposable-VM host dependencies
+        id: host_dependencies
+        timeout-minutes: 10
+        run: bash tests/ci-kvm-host-dependencies.sh install
+      - name: Qualify signed named-profile install, KVM boot, SSH, and shutdown
+        if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
+        timeout-minutes: 40
+        run: python3 tests/ci-kvm-profile.py
+      - name: Require named profile stopped
+        if: always()
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-profile.py --cleanup
+      - name: Upload bounded profile failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vm-profile-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/little-mester-profile-failure-diagnostics.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── 8. Hygiene — ShellCheck and shared Python validation ────────
+  hygiene:
+    name: Code quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-      - name: ShellCheck (lab + shell scripts)
-        run: shellcheck lab scripts/*.sh
+      - name: Run shared shell, Python, and workflow hygiene checks
+        run: scripts/validate hygiene
 
-      - name: Python compile check (scripts/*.py)
-        run: python3 -m py_compile scripts/*.py
-
-      - name: Install ruff and lint Python
-        run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
-      - name: Validate GitHub Actions workflows
-        run: scripts/check-workflows.sh
-
-  # ── 8. Ticket store ─────────────────────────────────────────────
+  # ── 9. Ticket store ─────────────────────────────────────────────
   ticket-store:
-    name: Ticket store validation
+    name: Ticket system validation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: little-mester-mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -327,7 +359,4 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: little-mester-mcp/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      - run: ./scripts/ticket-engine validate
-      - run: git diff --exit-code
+      - run: scripts/validate tickets

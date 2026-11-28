@@ -1,0 +1,2 @@
+# Signed, fixed owner protocol for the minimum named-profile lifecycle.
+%lm-vm-control ALL=(root) NOPASSWD: /usr/libexec/little-mester-vm/profile-control ""
