@@ -67,8 +67,64 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def root_lstat(path: pathlib.Path) -> dict | None:
+    """Inspect one protected target as root without elevating the harness."""
+    probe = (
+        "import json, os, sys\n"
+        "try:\n"
+        " info = os.lstat(sys.argv[1])\n"
+        "except FileNotFoundError:\n"
+        " raise SystemExit(3)\n"
+        "except OSError as error:\n"
+        " print(f'{type(error).__name__}: {error}', file=sys.stderr)\n"
+        " raise SystemExit(2)\n"
+        "print(json.dumps({'mode': info.st_mode, 'uid': info.st_uid, 'gid': info.st_gid,"
+        " 'nlink': info.st_nlink, 'size': info.st_size}))\n"
+    )
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", probe, str(path)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=10, check=False)
+    if result.returncode == 3:
+        return None
+    if result.returncode != 0:
+        raise RuntimeError(f"privileged read-only path inspection failed for {path.name}: "
+                           f"{result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def root_read_file(path: pathlib.Path, *, limit: int) -> bytes:
+    """Read one bounded protected regular file for a CI assertion only."""
+    reader = (
+        "import os, stat, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+        "try:\n"
+        " info = os.fstat(fd)\n"
+        " if not stat.S_ISREG(info.st_mode) or info.st_size > int(sys.argv[2]):\n"
+        "  raise SystemExit('protected file is not a bounded regular file')\n"
+        " data = bytearray()\n"
+        " while True:\n"
+        "  block = os.read(fd, min(65536, int(sys.argv[2]) + 1 - len(data)))\n"
+        "  if not block: break\n"
+        "  data.extend(block)\n"
+        "  if len(data) > int(sys.argv[2]):\n"
+        "   raise SystemExit('protected file exceeds its read bound')\n"
+        " sys.stdout.buffer.write(data)\n"
+        "finally:\n"
+        " os.close(fd)\n"
+    )
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", reader,
+         str(path), str(limit)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=10, check=False)
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"privileged bounded read failed for {path.name}: {detail}")
+    return result.stdout
+
+
 def assert_absent(path: pathlib.Path) -> None:
-    if path.exists() or path.is_symlink():
+    if root_lstat(path) is not None:
         raise RuntimeError(f"fresh hosted profile target already exists; preserving it: {path}")
 
 
@@ -244,6 +300,12 @@ def qualification() -> None:
     require(candidate.is_dir(), "owner candidate installer did not publish the pinned runtime")
     print(f"profile_candidate_install=PASS sha={sha} owner={owner.pw_name}")
 
+    # Enroll the owner and install fixed host prerequisites through the same
+    # production installer used by the singleton acceptance path. This job has
+    # its own fresh runner, so it cannot rely on the default-instance job.
+    run(["/usr/bin/sudo", "-n", str(candidate / "tools/vm-system-install")], timeout=300)
+    print("profile_host_enrollment=PASS installer=production-vm-system-install")
+
     started = False
     with tempfile.TemporaryDirectory(prefix="lm-profile-signing-",
                                      dir=os.environ.get("RUNNER_TEMP")) as raw_temp:
@@ -263,7 +325,7 @@ def qualification() -> None:
         run([str(REPO / "lab"), "vm", "profile", "install", PROFILE_NAME],
             timeout=600, env=env)
         mapping_path = pathlib.Path("/etc/little-mester-vm/profiles") / PROFILE_NAME / "profile.json"
-        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        mapping = json.loads(root_read_file(mapping_path, limit=1024 * 1024))
         require(mapping.get("state") == "ready" and mapping.get("transaction") is None
                 and mapping.get("runtime", {}).get("sha") == sha
                 and mapping.get("provisioning", {}).get("artifacts", {}).get("disk", {}).get("virtual_size")
@@ -287,9 +349,13 @@ def qualification() -> None:
             states.append(result.stdout.strip())
         require(all(state in ("inactive", "failed") for state in states),
                 f"profile services did not stop cleanly: {states}")
-        require(instance.disk.is_file() and instance.seed.is_file()
-                and mapping_path.is_file(), "profile down removed persistent state")
-        require(not instance.proxy_port_file.exists(), "profile proxy port marker remained after down")
+        persistent_files = (instance.disk, instance.seed, mapping_path)
+        for path in persistent_files:
+            info = root_lstat(path)
+            require(info is not None and stat.S_ISREG(info["mode"]),
+                    f"profile down removed or changed persistent file: {path.name}")
+        require(root_lstat(instance.proxy_port_file) is None,
+                "profile proxy port marker remained after down")
         print("profile_down=PASS systemd_stopped=true persistent_disk_and_seed=retained")
 
     print("named_profile_kvm_qualification=PASS path=signed-install/install/up/ssh/down kvm=real")
