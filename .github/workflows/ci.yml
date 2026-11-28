@@ -92,6 +92,7 @@ jobs:
           python3 tests/vm-opencode-preferences.test.py
           python3 tests/vm-host-dependencies.test.py
           python3 tests/vm-instance.test.py
+          python3 tests/profile-control-core.test.py
           python3 tests/ci-kvm-system-unit.test.py
           python3 tests/ci-kvm-host-dependencies.test.py
           python3 tests/vm-guest-user-dirs.test.py

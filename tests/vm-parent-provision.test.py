@@ -8,6 +8,7 @@ import os
 import pathlib
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -170,6 +171,85 @@ class ParentProvisionTests(unittest.TestCase):
                 parent_provision.validate_profile_overlay_info(
                     {**valid, **change}, expected_base=base)
 
+    def test_approved_base_validator_requires_exact_pinned_image_features(self):
+        valid = {
+            "format": "qcow2", "virtual-size": parent_provision.PROFILE_BASE_VIRTUAL_SIZE,
+            "cluster-size": 65536, "format-specific": {"type": "qcow2", "data": {
+                "compat": "1.1", "compression-type": "zlib", "refcount-bits": 16,
+                "lazy-refcounts": False, "corrupt": False, "extended-l2": False,
+            }},
+        }
+        self.assertEqual(parent_provision.validate_profile_base_info(valid),
+                         parent_provision.PROFILE_BASE_VIRTUAL_SIZE)
+        for change in (
+                {"backing-filename": "/tmp/other.qcow2"},
+                {"full-backing-filename": "/tmp/other.qcow2"},
+                {"data-file": "/tmp/data"},
+                {"format-specific": {"type": "qcow2", "data": {
+                    **valid["format-specific"]["data"], "corrupt": True}}},
+                {"format-specific": {"type": "qcow2", "data": {
+                    **valid["format-specific"]["data"], "lazy-refcounts": True}}},
+                {"format-specific": {"type": "qcow2", "data": {
+                    **valid["format-specific"]["data"], "refcount-bits": 32}}}):
+            with self.subTest(change=change), self.assertRaises(parent_provision.Refused):
+                parent_provision.validate_profile_base_info({**valid, **change})
+
+    def test_fd_only_overlay_inspector_accepts_fixture_without_spawning_or_opening_paths(self):
+        with tempfile.TemporaryDirectory(prefix="vm-profile-header-fixture-") as temporary:
+            root = pathlib.Path(temporary)
+            base = root / "approved-base.qcow2"
+            base.write_bytes(b"not opened by the header inspector")
+            overlay = root / "overlay.qcow2"
+            path = str(base).encode("utf-8")
+            backing_offset = 528
+            header = struct.pack(
+                ">IIQI I Q I I Q Q I I Q Q Q Q I I",
+                parent_provision.PROFILE_QCOW_MAGIC, 3,
+                backing_offset, len(path), 16, parent_provision.PROFILE_OVERLAY_SIZE,
+                0, 128, 196608, 65536, 1, 0, 0,
+                0, 0, 0, 4, parent_provision.PROFILE_QCOW_HEADER_LENGTH)
+            self.assertEqual(len(header), 104)
+            feature_table = parent_provision._profile_feature_table()
+            extension_bytes = (
+                struct.pack(">II", parent_provision.PROFILE_QCOW_BACKING_FORMAT, 5)
+                + b"qcow2" + b"\0" * 3
+                + struct.pack(">II", parent_provision.PROFILE_QCOW_FEATURE_TABLE,
+                              len(feature_table))
+                + feature_table
+                + struct.pack(">II", 0, 0))
+            self.assertEqual(len(extension_bytes), backing_offset - 112)
+            fd = os.open(overlay, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                os.ftruncate(fd, 262144)
+                os.pwrite(fd, header + b"\0" * 8, 0)
+                os.pwrite(fd, extension_bytes, 112)
+                os.pwrite(fd, path, backing_offset)
+                with mock.patch.object(parent_provision.os, "open",
+                                       side_effect=AssertionError("inspector opened a path")), \
+                        mock.patch.object(parent_provision.subprocess, "run",
+                                          side_effect=AssertionError("inspector launched a tool")):
+                    inspected = parent_provision.inspect_profile_overlay_fd(
+                        fd, expected_base=str(base), expected_uid=os.getuid())
+                self.assertEqual(inspected["virtual_size"], parent_provision.PROFILE_OVERLAY_SIZE)
+                self.assertEqual(inspected["backing_file"], str(base))
+
+                mutations = (
+                    (112, (0x44415441).to_bytes(4, "big"), "unsupported qcow2 extension"),
+                    (72, (1 << 2).to_bytes(8, "big"), "unsupported geometry or features"),
+                    (104, b"X" + b"\0" * 7, "unsupported geometry or features"),
+                    (backing_offset, b"/" + b"x" * (len(path) - 1), "backing reference"),
+                )
+                restores = (extension_bytes[:4], b"\0" * 8, b"\0" * 8, path)
+                offsets = (112, 72, 104, backing_offset)
+                for (mutation_offset, changed, message), original, restore_offset in zip(
+                        mutations, restores, offsets, strict=True):
+                    os.pwrite(fd, changed, mutation_offset)
+                    with self.assertRaisesRegex(parent_provision.Refused, message):
+                        parent_provision.inspect_profile_overlay_fd(fd, expected_base=str(base))
+                    os.pwrite(fd, original, restore_offset)
+            finally:
+                os.close(fd)
+
     @unittest.skipUnless(shutil.which("qemu-img") and shutil.which("qemu-io"),
                          "qemu-img and qemu-io are required for the real overlay probe")
     def test_real_sparse_overlays_are_independent_and_preserve_the_base(self):
@@ -193,11 +273,65 @@ class ParentProvisionTests(unittest.TestCase):
             fds = [os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                    for path in (vm_a, vm_b)]
             try:
-                results = [parent_provision.create_profile_overlay(
-                    base_path=str(base), base_sha256=base_digest,
-                    base_virtual_size=base_virtual_size, directory_fd=directory_fd,
-                    qemu_img=qemu_img)
-                    for directory_fd in fds]
+                with mock.patch.object(parent_provision, "IMAGE_SHA256", base_digest), \
+                        mock.patch.object(parent_provision, "PROFILE_BASE_VIRTUAL_SIZE",
+                                          base_virtual_size):
+                    results = [parent_provision.create_profile_overlay(
+                        base_path=str(base), base_sha256=base_digest,
+                        base_virtual_size=base_virtual_size, directory_fd=directory_fd,
+                        directory_uid=os.getuid(), directory_gid=os.getgid(),
+                        qemu_img=qemu_img)
+                        for directory_fd in fds]
+                overlay_fd = os.open("disk.qcow2", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=fds[0])
+                try:
+                    with mock.patch.object(parent_provision.os, "open",
+                                           side_effect=AssertionError("inspector reopened a path")), \
+                            mock.patch.object(parent_provision.subprocess, "run",
+                                              side_effect=AssertionError("inspector launched a tool")):
+                        observed = parent_provision.inspect_profile_overlay_fd(
+                            overlay_fd, expected_base=str(base),
+                            expected_identity=(results[0]["device"], results[0]["inode"]),
+                            expected_uid=os.getuid())
+                    self.assertEqual(observed["virtual_size"], 64 * 1024**3)
+                    self.assertEqual(observed["backing_file"], str(base))
+
+                    header = os.pread(overlay_fd, 112, 0)
+                    backing_offset = int.from_bytes(header[8:16], "big")
+                    backing_length = int.from_bytes(header[16:20], "big")
+                    original_backing = os.pread(overlay_fd, backing_length, backing_offset)
+                    poisoned = (b"/" + b"x" * (backing_length - 1))
+                    self.assertEqual(len(poisoned), backing_length)
+                    os.pwrite(overlay_fd, poisoned, backing_offset)
+                    with self.assertRaisesRegex(parent_provision.Refused, "backing reference"):
+                        parent_provision.inspect_profile_overlay_fd(
+                            overlay_fd, expected_base=str(base))
+                    os.pwrite(overlay_fd, original_backing, backing_offset)
+
+                    extension = os.pread(overlay_fd, 8, 112)
+                    external_data_extension = (0x44415441).to_bytes(4, "big") + extension[4:]
+                    os.pwrite(overlay_fd, external_data_extension, 112)
+                    with self.assertRaisesRegex(parent_provision.Refused, "unsupported qcow2 extension"):
+                        parent_provision.inspect_profile_overlay_fd(
+                            overlay_fd, expected_base=str(base))
+                    os.pwrite(overlay_fd, extension, 112)
+
+                    os.pwrite(overlay_fd, (1 << 2).to_bytes(8, "big"), 72)
+                    with self.assertRaisesRegex(parent_provision.Refused, "unsupported geometry or features"):
+                        parent_provision.inspect_profile_overlay_fd(
+                            overlay_fd, expected_base=str(base))
+                    os.pwrite(overlay_fd, header[72:80], 72)
+
+                    read_only_fd = os.open("disk.qcow2", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                           dir_fd=fds[0])
+                    try:
+                        with self.assertRaisesRegex(parent_provision.Refused, "descriptor identity"):
+                            parent_provision.inspect_profile_overlay_fd(
+                                read_only_fd, expected_base=str(base))
+                    finally:
+                        os.close(read_only_fd)
+                finally:
+                    os.close(overlay_fd)
             finally:
                 for directory_fd in fds:
                     os.close(directory_fd)
@@ -234,17 +368,22 @@ class ParentProvisionTests(unittest.TestCase):
             directory.mkdir(mode=0o700)
             fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                with mock.patch.object(parent_provision, "_validate_host_tool"):
-                    with self.assertRaisesRegex(parent_provision.Refused, "digest is invalid"):
+                with mock.patch.object(parent_provision, "_validate_host_tool"), \
+                        mock.patch.object(parent_provision, "IMAGE_SHA256",
+                                          hashlib.sha256(b"fixture").hexdigest()), \
+                        mock.patch.object(parent_provision, "PROFILE_BASE_VIRTUAL_SIZE", 1024):
+                    with self.assertRaisesRegex(parent_provision.Refused, "exact approved base"):
                         parent_provision.create_profile_overlay(
                             base_path=str(base), base_sha256="0" * 64,
-                            base_virtual_size=1024, directory_fd=fd)
+                            base_virtual_size=1024, directory_fd=fd,
+                            directory_uid=os.getuid(), directory_gid=os.getgid())
                     existing = directory / "disk.qcow2"
                     existing.write_bytes(b"foreign")
                     with self.assertRaisesRegex(parent_provision.Refused, "pre-existing"):
                         parent_provision.create_profile_overlay(
                             base_path=str(base), base_sha256=hashlib.sha256(b"fixture").hexdigest(),
-                            base_virtual_size=1024, directory_fd=fd)
+                            base_virtual_size=1024, directory_fd=fd,
+                            directory_uid=os.getuid(), directory_gid=os.getgid())
                     self.assertEqual(existing.read_bytes(), b"foreign")
             finally:
                 os.close(fd)
