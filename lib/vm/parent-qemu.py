@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
+import stat
 
 
 def _port(value: int, name: str) -> None:
@@ -47,6 +49,20 @@ def _network_args(*, ssh_port: int, restricted: bool,
                                          proxy_port=proxy_port, metrics=metrics,
                                          metrics_port=metrics_port),
             "-device", "virtio-net-pci,netdev=net0"]
+
+
+def _profile_fd(fd: int, *, label: str, access: int, mode: int) -> tuple[int, int]:
+    if type(fd) is not int or fd < 3:
+        raise ValueError(f"{label} descriptor must be an open non-standard file descriptor")
+    try:
+        info = os.fstat(fd)
+        access_mode = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
+    except OSError as error:
+        raise ValueError(f"{label} descriptor is not open") from error
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != mode or access_mode != access):
+        raise ValueError(f"{label} descriptor has an unsafe type, mode, or access mode")
+    return info.st_dev, info.st_ino
 
 
 def build_user_netdev(*, ssh_port: int, restricted: bool, proxy_port: int | None = None,
@@ -130,6 +146,7 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
     profile_fds = disk_fd is not None or base_fd is not None or seed_fd is not None
     if profile_fds and (disk_fd is None or base_fd is None or seed_fd is None):
         raise ValueError("profile overlay, approved base, and seed descriptors must be supplied together")
+    handoff_fds: tuple[int, ...] = ()
     if disk_fd is None:
         disk_paths = (("system disk", disk_path),)
         seed_args = _virtio_scsi_seed(seed_iso) if seed_fd is None else None
@@ -139,16 +156,22 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
             "-device", "virtio-blk-pci,drive=system-qcow2",
         ]
     else:
-        for label, fd in (("profile overlay", disk_fd), ("approved base", base_fd),
-                          ("profile seed", seed_fd)):
-            if type(fd) is not int or fd < 3:
-                raise ValueError(f"{label} descriptor must be an open non-standard file descriptor")
+        if any(type(fd) is not int or fd < 3 for fd in (disk_fd, base_fd, seed_fd)):
+            raise ValueError("profile QEMU descriptors must be open non-standard file descriptors")
         if len({disk_fd, base_fd, seed_fd}) != 3:
             raise ValueError("profile overlay, approved base, and seed descriptors must be distinct")
         if disk_path is not None:
             raise ValueError("profile QEMU launch must use its verified overlay descriptor, not a path")
         if seed_iso is not None:
             raise ValueError("profile QEMU launch must use its verified seed descriptor, not a path")
+        identities = (
+            _profile_fd(disk_fd, label="profile overlay", access=os.O_RDWR, mode=0o600),
+            _profile_fd(base_fd, label="approved base", access=os.O_RDONLY, mode=0o444),
+            _profile_fd(seed_fd, label="profile seed", access=os.O_RDONLY, mode=0o600),
+        )
+        if len(set(identities)) != 3:
+            raise ValueError("profile overlay, approved base, and seed must be distinct files")
+        handoff_fds = (disk_fd, base_fd, seed_fd)
         disk_paths = ()
         seed_args = [
             "-add-fd", f"fd={seed_fd},set=3,opaque=profile-seed",
@@ -187,7 +210,7 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
         "-numa", "node,memdev=workspace-mem",
     ])
     machine_memory = _machine_memory(name=vm_name, cpus=cpus, memory_mib=memory_mib)
-    return [
+    argv = [
         executable,
         *machine_memory,
         *shared_memory,
@@ -205,6 +228,17 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
         "-qmp", f"unix:{qmp_socket},server=on,wait=off",
         "-no-reboot",
     ]
+    changed_inheritance = []
+    try:
+        for fd in handoff_fds:
+            if not os.get_inheritable(fd):
+                os.set_inheritable(fd, True)
+                changed_inheritance.append(fd)
+    except OSError as error:
+        for fd in changed_inheritance:
+            os.set_inheritable(fd, False)
+        raise ValueError("profile QEMU descriptors could not be prepared for exact-FD handoff") from error
+    return argv
 
 
 def build_smoke_qemu_argv(*, executable: str, vm_name: str, cpus: int,
