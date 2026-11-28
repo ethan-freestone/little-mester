@@ -1911,7 +1911,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
         self.assertTrue({
             "lib/vm/parent-state.py", "lib/vm/parent-launcher.py",
             "lib/vm/parent-gate.py", "lib/vm/parent-supervisor.py",
-            "lib/vm/parent-qemu.py", "lib/vm/parent-provision.py",
+            "lib/vm/parent-qemu.py", "lib/vm/parent-provision.py", "lib/vm/vm-instance.py",
             "lib/vm/parent-session-contract.py",
             "scripts/parent-readonly-safety-gate.py",
             "agent/opencode/plugins/little-mester-exit-confirm/package.json",

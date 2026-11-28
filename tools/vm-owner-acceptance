@@ -81,6 +81,7 @@ INSTALL_FILES = {
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
     "lib/vm/system-vm.py": 0o644,
+    "lib/vm/vm-instance.py": 0o644,
     "lib/vm/system-vm-workspace.py": 0o644,
     "lib/vm/system-vm-metrics.py": 0o644,
     "lib/vm/parent-metrics.py": 0o644,

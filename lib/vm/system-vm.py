@@ -35,26 +35,36 @@ import sys
 import time
 
 
-SERVICE_USER = "lm-vm"
-PROXY_USER = "lm-vm-proxy"
+INSTANCE_POLICY_PATH = pathlib.Path(__file__).with_name("vm-instance.py")
+INSTANCE_POLICY_SPEC = importlib.util.spec_from_file_location(
+    "system_vm_instance_policy", INSTANCE_POLICY_PATH)
+if INSTANCE_POLICY_SPEC is None or INSTANCE_POLICY_SPEC.loader is None:
+    raise RuntimeError("fixed VM instance descriptor is unavailable")
+INSTANCE_POLICY = importlib.util.module_from_spec(INSTANCE_POLICY_SPEC)
+sys.modules[INSTANCE_POLICY_SPEC.name] = INSTANCE_POLICY
+INSTANCE_POLICY_SPEC.loader.exec_module(INSTANCE_POLICY)
+INSTANCE = INSTANCE_POLICY.Instance.singleton()
+
+SERVICE_USER = INSTANCE.vm_user
+PROXY_USER = INSTANCE.proxy_user
 CONTROL_GROUP = "lm-vm-control"
 KVM_GROUP = "kvm"
 PR_SET_NO_NEW_PRIVS = 38
 NNP_REQUIRED_ROLES = frozenset({"qemu", "proxy", "metrics"})
-STATE = pathlib.Path("/var/lib/little-mester-vm")
-CONFIG = pathlib.Path("/etc/little-mester-vm")
-DISK = STATE / "disk.qcow2"
-SEED = STATE / "seed.iso"
-CONTROL_KEY = CONFIG / "control_ed25519"
-HOST_KEY = CONFIG / "ssh_host_ed25519_key"
-KNOWN_HOSTS = CONFIG / "known_hosts"
-QMP_RUNTIME = pathlib.Path("/run/little-mester-vm")
-QMP_SOCKET_PATH = QMP_RUNTIME / "qmp.sock"
-PROXY_RUNTIME = pathlib.Path("/run/lm-vm-proxy")
-PROXY_PORT_FILE = PROXY_RUNTIME / "port"
-SSH_PORT = 22222
-PROXY_PORT = 32128
-WORKSPACE_SOCKET = pathlib.Path("/run/little-mester-vm-workspace/virtiofs.sock")
+STATE = INSTANCE.state_root
+CONFIG = INSTANCE.config_root
+DISK = INSTANCE.disk
+SEED = INSTANCE.seed
+CONTROL_KEY = INSTANCE.control_key
+HOST_KEY = INSTANCE.host_key
+KNOWN_HOSTS = INSTANCE.known_hosts
+QMP_RUNTIME = INSTANCE.qmp_runtime
+QMP_SOCKET_PATH = INSTANCE.qmp_socket
+PROXY_RUNTIME = INSTANCE.proxy_runtime
+PROXY_PORT_FILE = INSTANCE.proxy_port_file
+SSH_PORT = INSTANCE.ssh_port
+PROXY_PORT = INSTANCE.proxy_port
+WORKSPACE_SOCKET = INSTANCE.workspace_socket
 QMP_STOP_TIMEOUT = 18.0
 SSH_READY_TIMEOUT = 900.0
 IMAGE_SHA256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
@@ -218,7 +228,9 @@ def qemu_argv() -> list[str]:
     return module.build_system_qemu_argv(
         executable="/usr/bin/qemu-system-x86_64", disk_path=str(DISK), seed_iso=str(SEED),
         ssh_port=SSH_PORT, proxy_port=proxy, qmp_socket=str(QMP_SOCKET_PATH),
-        vm_name="little-mester-system-vm", virtiofs_socket=str(WORKSPACE_SOCKET))
+        vm_name=INSTANCE.name, virtiofs_socket=str(WORKSPACE_SOCKET),
+        cpus=INSTANCE.cpus, memory_mib=INSTANCE.memory_mib,
+        metrics_port=INSTANCE.metrics_port)
 
 
 def _verify_workspace_share() -> None:

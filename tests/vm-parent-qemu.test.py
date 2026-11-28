@@ -91,8 +91,9 @@ class ParentQemuArgvTests(unittest.TestCase):
             seed_iso="/var/lib/little-mester-vm/profiles/dev/vm/seed.iso",
             ssh_port=22223, proxy_port=22224,
             qmp_socket="/run/little-mester-vm-profiles/dev/qmp.sock",
-            vm_name="little-mester-profile-dev", virtiofs_socket=None,
-            disk_fd=7, base_fd=8, cpus=2, memory_mib=4096)
+            vm_name="little-mester-profile-dev",
+            virtiofs_socket="/run/little-mester-vm-profiles/dev/workspace/virtiofs.sock",
+            disk_fd=7, base_fd=8, cpus=2, memory_mib=4096, metrics_port=22225)
         self.assertEqual(argv[argv.index("-add-fd") + 1],
                          "fd=8,set=1,opaque=profile-base")
         second_add = argv.index("-add-fd", argv.index("-add-fd") + 1)
@@ -102,6 +103,7 @@ class ParentQemuArgvTests(unittest.TestCase):
         self.assertIn("filename=/dev/fdset/2,locking=on,auto-read-only=off", joined)
         self.assertIn("backing=profile-base-qcow2", joined)
         self.assertIn("drive=profile-overlay-qcow2", joined)
+        self.assertIn("TCP:127.0.0.1:22225", joined)
         self.assertNotIn("/var/lib/little-mester-vm/profiles/dev/vm/disk.qcow2", joined)
         self.assertEqual(argv[argv.index("-m") + 1], "4096")
 
@@ -118,6 +120,10 @@ class ParentQemuArgvTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must use its verified overlay descriptor"):
             parent_qemu.build_system_qemu_argv(
                 **{**base, "disk_path": "/disk.qcow2"}, disk_fd=7, base_fd=8)
+        with self.assertRaisesRegex(ValueError, "metrics port"):
+            parent_qemu.build_system_qemu_argv(
+                **base, virtiofs_socket="/workspace.sock", disk_fd=7, base_fd=8,
+                metrics_port=80)
 
     def test_disk_is_fdset_backed_with_explicit_qcow2_and_writer_locking(self):
         argv = parent_qemu.build_qemu_argv(

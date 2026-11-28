@@ -39,6 +39,7 @@ WORKSPACE_UNIT = "little-mester-vm-workspace.service"
 METRICS_UNIT = "little-mester-vm-metrics.service"
 PINNED_INSTALL_ASSETS = {
     "/usr/lib/little-mester-vm/system-vm.py": ("lib/vm/system-vm.py", 0o644),
+    "/usr/lib/little-mester-vm/vm-instance.py": ("lib/vm/vm-instance.py", 0o644),
     "/usr/lib/little-mester-vm/system-vm-workspace.py":
         ("lib/vm/system-vm-workspace.py", 0o644),
     "/usr/lib/little-mester-vm/parent-qemu.py": ("lib/vm/parent-qemu.py", 0o644),

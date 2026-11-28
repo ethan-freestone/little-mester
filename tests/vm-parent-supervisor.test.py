@@ -653,7 +653,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
-                "lib/vm/parent-provision.py", "lib/vm/system-vm.py",
+                "lib/vm/parent-provision.py", "lib/vm/system-vm.py", "lib/vm/vm-instance.py",
                 "lib/vm/guest-compatibility.py", "lib/vm/code-update-transaction.py",
                 "lib/vm/system-vm-workspace.py",
                 "lib/vm/system-vm-metrics.py", "lib/vm/parent-metrics.py",

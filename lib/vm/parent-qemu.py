@@ -41,20 +41,24 @@ def _virtio_qcow2_drive(disk_path: str) -> list[str]:
 
 
 def _network_args(*, ssh_port: int, restricted: bool,
-                  proxy_port: int | None = None, metrics: bool = False) -> list[str]:
+                  proxy_port: int | None = None, metrics: bool = False,
+                  metrics_port: int = 32129) -> list[str]:
     return ["-netdev", build_user_netdev(ssh_port=ssh_port, restricted=restricted,
-                                         proxy_port=proxy_port, metrics=metrics),
+                                         proxy_port=proxy_port, metrics=metrics,
+                                         metrics_port=metrics_port),
             "-device", "virtio-net-pci,netdev=net0"]
 
 
 def build_user_netdev(*, ssh_port: int, restricted: bool, proxy_port: int | None = None,
-                      metrics: bool = False) -> str:
+                      metrics: bool = False, metrics_port: int = 32129) -> str:
     """Build the reviewed user-mode networking policy used by all launch paths."""
     _port(ssh_port, "SSH port")
     if type(restricted) is not bool:
         raise ValueError("restricted networking selector must be boolean")
     if type(metrics) is not bool:
         raise ValueError("host metrics network selector must be boolean")
+    if metrics:
+        _port(metrics_port, "metrics port")
     if metrics and (not restricted or proxy_port is None):
         raise ValueError("host metrics forwarding requires the fixed restricted proxy network")
     if restricted:
@@ -64,7 +68,7 @@ def build_user_netdev(*, ssh_port: int, restricted: bool, proxy_port: int | None
             return f"user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
         _port(proxy_port, "proxy port")
         metrics_forward = (
-            ",guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:32129"
+            f",guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:{metrics_port}"
             if metrics else "")
         return (f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22,"
                 f"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:{proxy_port}"
@@ -111,7 +115,8 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
                            ssh_port: int, proxy_port: int, qmp_socket: str,
                            vm_name: str, virtiofs_socket: str | None = None,
                            disk_fd: int | None = None, base_fd: int | None = None,
-                           cpus: int = 2, memory_mib: int = 4096) -> list[str]:
+                           cpus: int = 2, memory_mib: int = 4096,
+                           metrics_port: int = 32129) -> list[str]:
     """Build fixed-instance QEMU argv, optionally binding an overlay to exact FDs.
 
     With no FDs, the fixed singleton keeps its established direct disk path and
@@ -180,7 +185,7 @@ def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: 
             "-chardev", f"socket,id=workspace,path={virtiofs_socket}",
             "-device", "vhost-user-fs-pci,chardev=workspace,tag=workspace"]),
         *_network_args(ssh_port=ssh_port, restricted=True, proxy_port=proxy_port,
-                       metrics=virtiofs_socket is not None),
+                       metrics=virtiofs_socket is not None, metrics_port=metrics_port),
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",
