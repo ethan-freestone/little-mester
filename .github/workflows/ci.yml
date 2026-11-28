@@ -21,7 +21,7 @@ concurrency:
 jobs:
   # ── 1. TypeScript / Node ─────────────────────────────────────────
   node:
-    name: Build & test (TypeScript)
+    name: TypeScript build and tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -41,7 +41,7 @@ jobs:
 
   # ── 2. Bats — lab script, TUI JSX guard, exit-confirm static ────
   bats:
-    name: Bats (lab, TUI JSX, exit-confirm)
+    name: CLI and TUI tests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -59,7 +59,7 @@ jobs:
 
   # ── 3. VM unit & contract tests ──────────────────────────────────
   vm-unit-contract:
-    name: VM unit & contract tests
+    name: VM unit and contract tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -104,7 +104,7 @@ jobs:
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
-    name: Transient QEMU guest integration
+    name: VM guest integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -203,7 +203,7 @@ jobs:
 
   # ── 5. Exploratory systemd namespace controls on a separate runner ──
   systemd-namespace-diagnostics:
-    name: Systemd namespace diagnostics
+    name: VM namespace diagnostics
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -217,7 +217,7 @@ jobs:
 
   # ── 6. Exact installed production acceptance on its own hosted KVM runner ──
   production-systemd-vm-acceptance:
-    name: Production systemd VM acceptance
+    name: VM default instance integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -293,7 +293,7 @@ jobs:
 
   # ── 7. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
-    name: Hygiene (shellcheck, py_compile, ruff)
+    name: Code quality
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -312,7 +312,7 @@ jobs:
 
   # ── 8. Ticket store ─────────────────────────────────────────────
   ticket-store:
-    name: Ticket store validation
+    name: Ticket system validation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
