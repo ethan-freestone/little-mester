@@ -9,12 +9,14 @@ import io
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -101,6 +103,27 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(order, [("lock", True), ("mapping", None)])
         with self.assertRaises(OSError):
             os.fstat(lock_fd)
+
+
+class RuntimeEnrollmentTests(unittest.TestCase):
+    def test_owner_record_binds_runtime_root_to_normalized_v3_parent(self):
+        record = {"schema_version": 2, "uid": 1000,
+                  "runtime_root": "/srv/little-mester-ci/v3"}
+        payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        info = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0,
+                               st_nlink=1, st_size=len(payload))
+        with (mock.patch.object(CONTROL.os, "lstat", return_value=info),
+              mock.patch.object(CONTROL, "_read_bounded", return_value=payload),
+              mock.patch.object(os.path, "realpath", return_value=record["runtime_root"])):
+            self.assertEqual(CONTROL._read_owner_record(), record)
+
+    def test_runtime_resolution_uses_enrolled_root_and_revalidates_ancestry(self):
+        record = {"schema_version": 2, "uid": 1000,
+                  "runtime_root": "/srv/little-mester-ci/v3"}
+        with (mock.patch.object(CONTROL, "_read_owner_record", return_value=record),
+              mock.patch.object(CONTROL, "_check_protected_ancestry") as check):
+            self.assertEqual(CONTROL._runtime_root(), pathlib.Path(record["runtime_root"]))
+        check.assert_called_once_with(pathlib.Path(record["runtime_root"]))
 
 
 class SignedBundleTests(unittest.TestCase):

@@ -1232,6 +1232,17 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result, 0)
             install.assert_called_once_with(ROOT, sha, prefix)
 
+    def test_profile_install_cli_uses_the_existing_protected_prefix_option(self):
+        sha = "a" * 40
+        prefix = pathlib.Path("/srv/little-mester-ci")
+        with mock.patch.object(acceptance, "owner_profile", return_value=0) as profile:
+            result = acceptance.main([
+                "--profile-operation", "install", "--profile-name", "ci-profile",
+                "--sha", sha, "--repo", str(ROOT), "--prefix", str(prefix)])
+        self.assertEqual(result, 0)
+        profile.assert_called_once_with(
+            "install", "ci-profile", repository=ROOT, sha=sha, prefix=prefix)
+
     def test_runtime_validator_accepts_protected_prefix_and_private_descendants(self):
         with tempfile.TemporaryDirectory() as temporary:
             system_parent, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)

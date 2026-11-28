@@ -242,7 +242,7 @@ PROFILE_CONTROL_ENTRY = pathlib.Path("/usr/libexec/little-mester-vm/profile-cont
 
 
 def owner_profile(operation: str, name: str, *, repository: pathlib.Path | None = None,
-                  sha: str | None = None) -> int:
+                  sha: str | None = None, prefix: pathlib.Path | None = None) -> int:
     """Submit the bounded named-profile protocol to the signed fixed helper."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name):
         raise GateError("BLOCKED", "profile name is outside the fixed grammar")
@@ -254,11 +254,11 @@ def owner_profile(operation: str, name: str, *, repository: pathlib.Path | None 
         if repository is None or sha is None:
             raise GateError("BLOCKED", "profile install requires a pinned candidate repository and SHA")
         candidate_commit(repository, sha)
-        target = install_path(sha)
+        target = install_path(sha, prefix)
         if target.exists() or target.is_symlink():
-            verify_install(repository, sha)
+            verify_install(repository, sha, prefix)
         else:
-            install_candidate(repository, sha)
+            install_candidate(repository, sha, prefix)
         request = {"schema_version": 1, "operation": operation,
                    "name": name, "runtime_sha": sha}
     elif operation in ("up", "down", "status", "ssh"):
@@ -2470,14 +2470,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.profile_operation == "install":
             if not args.sha or not args.repo:
                 parser().error("--profile-operation install requires --sha and --repo")
-            if args.prefix is not None and args.prefix != INSTALL_PARENT.parent:
-                parser().error("named profile runtime installs use the fixed /opt/little-mester prefix")
         elif args.sha or args.repo or args.prefix is not None:
             parser().error("profile lifecycle operations other than install do not accept --sha, --repo, or --prefix")
         try:
             repo = pathlib.Path(args.repo).resolve(strict=True) if args.repo else None
             return owner_profile(args.profile_operation, args.profile_name,
-                                 repository=repo, sha=args.sha)
+                                 repository=repo, sha=args.sha, prefix=args.prefix)
         except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
             print(f"BLOCKED: named profile owner command refused ({error})", file=sys.stderr)
             return 3

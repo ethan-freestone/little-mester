@@ -34,7 +34,6 @@ CONFIG = pathlib.Path("/etc/little-mester-vm")
 MAPPING_ROOT = CONFIG / "profiles"
 STATE_ROOT = pathlib.Path("/var/lib/little-mester-vm/profiles")
 RUNTIME_ROOT = pathlib.Path("/run/little-mester-vm-profiles")
-INSTALL_ROOT = pathlib.Path("/opt/little-mester/v3")
 CODE_LOCK = CONFIG / "code-update.lock"
 CODE_MARKER = CONFIG / "code-update.in-progress"
 OWNER_RECORD = CONFIG / "profile-control-owner.json"
@@ -203,28 +202,41 @@ def _read_bounded(path: pathlib.Path, *, uid: int, mode: int, limit: int) -> byt
         os.close(fd)
 
 
-def _read_owner_record() -> int:
+def _read_owner_record() -> dict[str, int | str]:
     try:
         info = os.lstat(OWNER_RECORD)
     except OSError as error:
         raise Refused("profile control is not enrolled for an owner") from error
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
             or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_nlink != 1 or info.st_size > 256):
+            or info.st_nlink != 1 or info.st_size > 8192):
         raise Refused("profile-control owner enrollment is unsafe")
     try:
-        record = json.loads(_read_bounded(OWNER_RECORD, uid=0, mode=0o600, limit=256))
+        record = json.loads(_read_bounded(OWNER_RECORD, uid=0, mode=0o600, limit=8192))
     except (UnicodeError, json.JSONDecodeError) as error:
         raise Refused("profile-control owner enrollment is malformed") from error
-    if (not isinstance(record, dict) or set(record) != {"schema_version", "uid"}
-            or type(record["schema_version"]) is not int or record["schema_version"] != 1
-            or type(record["uid"]) is not int or not 1 <= record["uid"] < 2**32 - 1):
+    if (not isinstance(record, dict)
+            or set(record) != {"schema_version", "uid", "runtime_root"}
+            or type(record["schema_version"]) is not int or record["schema_version"] != 2
+            or type(record["uid"]) is not int or not 1 <= record["uid"] < 2**32 - 1
+            or not isinstance(record["runtime_root"], str)):
         raise Refused("profile-control owner enrollment has an unsupported schema")
-    return record["uid"]
+    runtime_root = pathlib.Path(record["runtime_root"])
+    if (not runtime_root.is_absolute() or runtime_root.name != "v3"
+            or str(runtime_root) != os.path.normpath(str(runtime_root))
+            or ".." in runtime_root.parts or os.path.realpath(runtime_root) != str(runtime_root)):
+        raise Refused("profile-control enrollment has an invalid protected runtime root")
+    return record
+
+
+def _runtime_root() -> pathlib.Path:
+    root = pathlib.Path(_read_owner_record()["runtime_root"])
+    _check_protected_ancestry(root)
+    return root
 
 
 def _require_owner(caller_uid: int) -> None:
-    if caller_uid == 0 or caller_uid != _read_owner_record():
+    if caller_uid == 0 or caller_uid != _read_owner_record()["uid"]:
         raise Refused("profile control request is not from the enrolled owner")
     try:
         owner = pwd.getpwuid(caller_uid)
@@ -266,7 +278,7 @@ def _take_code_lock(*, exclusive: bool = False) -> int:
 def _runtime_manifest(runtime_sha: str) -> str:
     if not isinstance(runtime_sha, str) or re.fullmatch(r"[0-9a-f]{40}", runtime_sha) is None:
         raise Refused("profile runtime pin must be a complete lowercase commit SHA")
-    root = INSTALL_ROOT / runtime_sha
+    root = _runtime_root() / runtime_sha
     _check_protected_ancestry(root)
     _safe_root_dir(root, mode=0o755)
     digest_rows = []

@@ -371,7 +371,12 @@ def _install_profile_control_locked(root: pathlib.Path, owner: str,
     install_file(root / "sudoers/little-mester-vm-profile-control",
                  PROFILE_CONTROL_SUDOERS, 0o440,
                  payload=payloads["sudoers/little-mester-vm-profile-control"])
-    owner_payload = (json.dumps({"schema_version": 1, "uid": owner_info.pw_uid},
+    runtime_root = root.parent
+    if (runtime_root.name != "v3" or not runtime_root.is_absolute()
+            or os.path.realpath(runtime_root) != str(runtime_root)):
+        refuse("pinned profile runtime parent is not the protected v3 installation root")
+    owner_payload = (json.dumps({"schema_version": 2, "uid": owner_info.pw_uid,
+                                 "runtime_root": str(runtime_root)},
                                 sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
     if OWNER_RECORD.exists() or OWNER_RECORD.is_symlink():
         info = os.lstat(OWNER_RECORD)

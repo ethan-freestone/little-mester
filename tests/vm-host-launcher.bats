@@ -363,6 +363,7 @@ session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session
 session_contract_text = session_contract.read_text()
 profile_harness = pathlib.Path(sys.argv[1]).parents[1] / 'tests/ci-kvm-profile.py'
 profile_harness_text = profile_harness.read_text()
+lab_text = pathlib.Path(sys.argv[1]).parents[1].joinpath('lab').read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
 opencode_readiness_text = opencode_readiness_text.read_text()
 contract_text = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.sh').read_text()
@@ -560,8 +561,11 @@ assert 'bash tests/ci-kvm-host-dependencies.sh update' in profile_job
 assert 'bash tests/ci-kvm-host-dependencies.sh install' in profile_job
 assert "steps.host_dependencies.outcome == 'success'" in profile_job
 assert 'tools/vm-owner-acceptance' in profile_harness_text
+assert 'CI_INSTALL_PREFIX = SINGLETON_CI.CI_INSTALL_PREFIX' in profile_harness_text
+assert '"--prefix", str(CI_INSTALL_PREFIX)' in profile_harness_text
 assert 'str(candidate / "tools/vm-system-install")' in profile_harness_text
 assert 'profile_host_enrollment=PASS installer=production-vm-system-install' in profile_harness_text
+assert 'profile_args+=(--sha "$profile_sha" --repo "$LAB_DIR" "${profile_prefix[@]}")' in lab_text
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
 assert 'ci_kvm_qemu_args()' in contract_text and '--ci-argv --mode "$mode"' in contract_text
 assert 'build_ci_qemu_argv' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/parent-qemu.py').read_text()

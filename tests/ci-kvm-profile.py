@@ -27,7 +27,6 @@ import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 PROFILE_NAME = "ci-profile"
-INSTALL_ROOT = pathlib.Path("/opt/little-mester/v3")
 TRUST_KEY = pathlib.Path("/etc/little-mester-vm/profile-control-trust.pem")
 OWNER_RECORD = pathlib.Path("/etc/little-mester-vm/profile-control-owner.json")
 CONTROL_HELPER = pathlib.Path("/usr/libexec/little-mester-vm/profile-control")
@@ -47,6 +46,9 @@ def load_module(name: str, path: pathlib.Path):
 
 
 CONTROL = load_module("ci_profile_control", REPO / "lib/vm/profile-control.py")
+SINGLETON_CI = load_module("ci_kvm_system_unit", REPO / "tests/ci-kvm-system-unit.py")
+CI_INSTALL_PREFIX = SINGLETON_CI.CI_INSTALL_PREFIX
+CI_INSTALL_PARENT = SINGLETON_CI.CI_INSTALL_PARENT
 
 
 def run(argv: list[str], *, timeout: int = 60, check: bool = True,
@@ -266,7 +268,7 @@ def qualification() -> None:
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA must be a complete lowercase commit SHA")
     owner_uid = os.getuid()
     owner = pwd.getpwuid(owner_uid)
-    candidate = INSTALL_ROOT / sha
+    candidate = CI_INSTALL_PARENT / sha
     instance = CONTROL._instance(PROFILE_NAME, owner_uid, sha)
 
     paths = (
@@ -296,7 +298,8 @@ def qualification() -> None:
             raise RuntimeError(f"preserving pre-existing disposable service group: {username}")
 
     run([str(REPO / "tools/vm-owner-acceptance"), "--install",
-         "--sha", sha, "--repo", str(REPO)], timeout=180)
+         "--sha", sha, "--prefix", str(CI_INSTALL_PREFIX),
+         "--repo", str(REPO)], timeout=180)
     require(candidate.is_dir(), "owner candidate installer did not publish the pinned runtime")
     print(f"profile_candidate_install=PASS sha={sha} owner={owner.pw_name}")
 
@@ -322,7 +325,8 @@ def qualification() -> None:
 
         env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": owner.pw_dir,
                "LANG": "C", "LC_ALL": "C", "TERM": "xterm-256color"}
-        run([str(REPO / "lab"), "vm", "profile", "install", PROFILE_NAME],
+        run([str(REPO / "lab"), "vm", "profile", "install", PROFILE_NAME,
+             "--prefix", str(CI_INSTALL_PREFIX)],
             timeout=600, env=env)
         mapping_path = pathlib.Path("/etc/little-mester-vm/profiles") / PROFILE_NAME / "profile.json"
         mapping = json.loads(root_read_file(mapping_path, limit=1024 * 1024))
