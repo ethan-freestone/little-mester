@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -139,6 +140,114 @@ class ParentProvisionTests(unittest.TestCase):
             with self.subTest(data=data):
                 with self.assertRaises(parent_provision.Refused):
                     parent_provision.validate_qcow2_info(data, 64 * 1024**3)
+
+    def test_profile_overlay_validator_requires_exact_base_and_closed_qcow2_features(self):
+        base = "/var/lib/little-mester-vm/bases/approved/base.qcow2"
+        valid = {
+            "format": "qcow2", "virtual-size": 64 * 1024**3,
+            "cluster-size": 65536,
+            "backing-filename": base, "full-backing-filename": base,
+            "backing-filename-format": "qcow2",
+            "format-specific": {"type": "qcow2", "data": {
+                "compat": "1.1", "compression-type": "zlib",
+                "refcount-bits": 16, "lazy-refcounts": False,
+                "corrupt": False, "extended-l2": False,
+            }},
+        }
+        self.assertEqual(parent_provision.validate_profile_overlay_info(
+            valid, expected_base=base), parent_provision.PROFILE_OVERLAY_SIZE)
+        for change in (
+                {"backing-filename": "/tmp/foreign.qcow2"},
+                {"full-backing-filename": "/tmp/foreign.qcow2"},
+                {"backing-filename-format": "raw"},
+                {"data-file": "/tmp/external-data"},
+                {"cluster-size": 131072},
+                {"format-specific": {"data": {**valid["format-specific"]["data"],
+                                                "extended-l2": True}}},
+                {"format-specific": {"data": {**valid["format-specific"]["data"],
+                                                "corrupt": True}}}):
+            with self.subTest(change=change), self.assertRaises(parent_provision.Refused):
+                parent_provision.validate_profile_overlay_info(
+                    {**valid, **change}, expected_base=base)
+
+    @unittest.skipUnless(shutil.which("qemu-img") and shutil.which("qemu-io"),
+                         "qemu-img and qemu-io are required for the real overlay probe")
+    def test_real_sparse_overlays_are_independent_and_preserve_the_base(self):
+        qemu_img = shutil.which("qemu-img")
+        qemu_io = shutil.which("qemu-io")
+        assert qemu_img and qemu_io
+        with tempfile.TemporaryDirectory(prefix="vm-profile-overlay-") as temporary:
+            root = pathlib.Path(temporary)
+            base = root / "base.qcow2"
+            created = subprocess.run(
+                [qemu_img, "create", "-q", "-f", "qcow2", str(base), "1G"],
+                capture_output=True, timeout=20, check=False)
+            self.assertEqual(created.returncode, 0, created.stderr.decode(errors="replace"))
+            base.chmod(0o444)
+            base_digest = hashlib.sha256(base.read_bytes()).hexdigest()
+            base_virtual_size = 1024**3
+            vm_a = root / "vm-a"
+            vm_b = root / "vm-b"
+            vm_a.mkdir(mode=0o700)
+            vm_b.mkdir(mode=0o700)
+            fds = [os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                   for path in (vm_a, vm_b)]
+            try:
+                results = [parent_provision.create_profile_overlay(
+                    base_path=str(base), base_sha256=base_digest,
+                    base_virtual_size=base_virtual_size, directory_fd=directory_fd,
+                    qemu_img=qemu_img)
+                    for directory_fd in fds]
+            finally:
+                for directory_fd in fds:
+                    os.close(directory_fd)
+
+            self.assertEqual(results[0]["virtual_size"], 64 * 1024**3)
+            self.assertEqual(results[1]["virtual_size"], 64 * 1024**3)
+            self.assertLess(results[0]["allocated_bytes"], 64 * 1024**3)
+            self.assertLess(results[1]["allocated_bytes"], 64 * 1024**3)
+            self.assertNotEqual(results[0]["inode"], results[1]["inode"])
+            self.assertEqual(stat.S_IMODE((vm_a / "disk.qcow2").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((vm_b / "disk.qcow2").stat().st_mode), 0o600)
+
+            write = subprocess.run(
+                [qemu_io, "-f", "qcow2", "-c", "write -P 0x5a 0 4096",
+                 str(vm_a / "disk.qcow2")], capture_output=True, timeout=20, check=False)
+            self.assertEqual(write.returncode, 0, write.stderr.decode(errors="replace"))
+            read_a = subprocess.run(
+                [qemu_io, "-f", "qcow2", "-r", "-c", "read -P 0x5a 0 4096",
+                 str(vm_a / "disk.qcow2")], capture_output=True, timeout=20, check=False)
+            read_b = subprocess.run(
+                [qemu_io, "-f", "qcow2", "-r", "-c", "read -P 0x00 0 4096",
+                 str(vm_b / "disk.qcow2")], capture_output=True, timeout=20, check=False)
+            self.assertEqual(read_a.returncode, 0, read_a.stderr.decode(errors="replace"))
+            self.assertEqual(read_b.returncode, 0, read_b.stderr.decode(errors="replace"))
+            self.assertEqual(hashlib.sha256(base.read_bytes()).hexdigest(), base_digest)
+
+    def test_profile_overlay_refuses_bad_digest_or_preexisting_leaf_without_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="vm-profile-overlay-refusal-") as temporary:
+            root = pathlib.Path(temporary)
+            base = root / "base.qcow2"
+            base.write_bytes(b"fixture")
+            base.chmod(0o444)
+            directory = root / "vm"
+            directory.mkdir(mode=0o700)
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                with mock.patch.object(parent_provision, "_validate_host_tool"):
+                    with self.assertRaisesRegex(parent_provision.Refused, "digest is invalid"):
+                        parent_provision.create_profile_overlay(
+                            base_path=str(base), base_sha256="0" * 64,
+                            base_virtual_size=1024, directory_fd=fd)
+                    existing = directory / "disk.qcow2"
+                    existing.write_bytes(b"foreign")
+                    with self.assertRaisesRegex(parent_provision.Refused, "pre-existing"):
+                        parent_provision.create_profile_overlay(
+                            base_path=str(base), base_sha256=hashlib.sha256(b"fixture").hexdigest(),
+                            base_virtual_size=1024, directory_fd=fd)
+                    self.assertEqual(existing.read_bytes(), b"foreign")
+            finally:
+                os.close(fd)
 
     def test_failed_image_conversion_preserves_partial_evidence_and_never_publishes_disk(self):
         def fail_convert(argv, **kwargs):
