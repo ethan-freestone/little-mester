@@ -93,6 +93,7 @@ jobs:
           python3 tests/vm-host-dependencies.test.py
           python3 tests/vm-instance.test.py
           python3 tests/profile-control-core.test.py
+          python3 tests/vm-profile-control.test.py
           python3 tests/ci-kvm-system-unit.test.py
           python3 tests/ci-kvm-host-dependencies.test.py
           python3 tests/vm-guest-user-dirs.test.py
@@ -288,6 +289,14 @@ jobs:
         if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
         timeout-minutes: 45
         run: python3 tests/ci-kvm-system-unit.py
+      - name: Qualify signed named-profile install, KVM boot, SSH, and shutdown
+        if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
+        timeout-minutes: 40
+        run: python3 tests/ci-kvm-profile.py
+      - name: Require named profile stopped
+        if: always()
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-profile.py --cleanup
       - name: Require production systemd VM and proxy stopped
         if: always()
         timeout-minutes: 2
