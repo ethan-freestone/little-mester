@@ -107,14 +107,49 @@ def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port
     ]
 
 
-def build_system_qemu_argv(*, executable: str, disk_path: str, seed_iso: str,
+def build_system_qemu_argv(*, executable: str, disk_path: str | None, seed_iso: str,
                            ssh_port: int, proxy_port: int, qmp_socket: str,
-                           vm_name: str, virtiofs_socket: str | None = None) -> list[str]:
-    """Build direct ExecStart argv for the fixed system unit's new disk path."""
+                           vm_name: str, virtiofs_socket: str | None = None,
+                           disk_fd: int | None = None, base_fd: int | None = None,
+                           cpus: int = 2, memory_mib: int = 4096) -> list[str]:
+    """Build fixed-instance QEMU argv, optionally binding an overlay to exact FDs.
+
+    With no FDs, the fixed singleton keeps its established direct disk path and
+    block graph. Profile callers pass the already-open overlay and approved base
+    descriptors; QEMU then receives no backing path from the mutable overlay
+    header and can only use the explicitly wired read-only base node.
+    """
     if (not isinstance(executable, str) or not executable.startswith("/")
             or os.path.realpath(executable) != executable):
         raise ValueError("QEMU executable must be an absolute canonical path")
-    for label, path in (("system disk", disk_path), ("cloud-init seed", seed_iso)):
+    if (disk_fd is None) != (base_fd is None):
+        raise ValueError("profile overlay and approved base descriptors must be supplied together")
+    if disk_fd is None:
+        disk_paths = (("system disk", disk_path),)
+        block_graph = [
+            "-blockdev", f"driver=file,node-name=system-file,filename={disk_path},locking=on,auto-read-only=off",
+            "-blockdev", "driver=qcow2,node-name=system-qcow2,file=system-file,auto-read-only=off",
+            "-device", "virtio-blk-pci,drive=system-qcow2",
+        ]
+    else:
+        for label, fd in (("profile overlay", disk_fd), ("approved base", base_fd)):
+            if type(fd) is not int or fd < 3:
+                raise ValueError(f"{label} descriptor must be an open non-standard file descriptor")
+        if disk_fd == base_fd:
+            raise ValueError("profile overlay and approved base descriptors must be distinct")
+        if disk_path is not None:
+            raise ValueError("profile QEMU launch must use its verified overlay descriptor, not a path")
+        disk_paths = ()
+        block_graph = [
+            "-add-fd", f"fd={base_fd},set=1,opaque=profile-base",
+            "-add-fd", f"fd={disk_fd},set=2,opaque=profile-overlay",
+            "-blockdev", "driver=file,node-name=profile-base-file,filename=/dev/fdset/1,read-only=on",
+            "-blockdev", "driver=qcow2,node-name=profile-base-qcow2,file=profile-base-file,read-only=on",
+            "-blockdev", "driver=file,node-name=profile-overlay-file,filename=/dev/fdset/2,locking=on,auto-read-only=off",
+            "-blockdev", "driver=qcow2,node-name=profile-overlay-qcow2,file=profile-overlay-file,backing=profile-base-qcow2,auto-read-only=off",
+            "-device", "virtio-blk-pci,drive=profile-overlay-qcow2",
+        ]
+    for label, path in (*disk_paths, ("cloud-init seed", seed_iso)):
         if (not isinstance(path, str) or not path.startswith("/")
                 or any(character in path for character in ("\0", "\n", "\r", ","))):
             raise ValueError(f"{label} path is not safe for QEMU option encoding")
@@ -133,15 +168,13 @@ def build_system_qemu_argv(*, executable: str, disk_path: str, seed_iso: str,
         "-object", "memory-backend-memfd,id=workspace-mem,size=4096M,share=on",
         "-numa", "node,memdev=workspace-mem",
     ])
-    machine_memory = _machine_memory(name=vm_name, cpus=2, memory_mib=4096)
+    machine_memory = _machine_memory(name=vm_name, cpus=cpus, memory_mib=memory_mib)
     return [
         executable,
         *machine_memory,
         *shared_memory,
         "-enable-kvm",
-        "-blockdev", f"driver=file,node-name=system-file,filename={disk_path},locking=on,auto-read-only=off",
-        "-blockdev", "driver=qcow2,node-name=system-qcow2,file=system-file,auto-read-only=off",
-        "-device", "virtio-blk-pci,drive=system-qcow2",
+        *block_graph,
         *_virtio_scsi_seed(seed_iso),
         *([] if virtiofs_socket is None else [
             "-chardev", f"socket,id=workspace,path={virtiofs_socket}",
