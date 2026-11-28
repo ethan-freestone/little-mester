@@ -53,14 +53,13 @@ CI_INSTALL_PARENT = SINGLETON_CI.CI_INSTALL_PARENT
 
 def run(argv: list[str], *, timeout: int = 60, check: bool = True,
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, timeout=timeout,
-                            check=False, env=env)
+    result = SINGLETON_CI.run(argv, timeout=timeout, check=False, env=env)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    if output.strip():
+        print(output.rstrip())
     if check and result.returncode:
         raise RuntimeError(f"command failed ({result.returncode}): {' '.join(argv)}\n"
-                           f"{result.stdout[-5000:]}")
-    if result.stdout.strip():
-        print(result.stdout.rstrip())
+                           f"{output[-5000:]}")
     return result
 
 
@@ -69,64 +68,8 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def root_lstat(path: pathlib.Path) -> dict | None:
-    """Inspect one protected target as root without elevating the harness."""
-    probe = (
-        "import json, os, sys\n"
-        "try:\n"
-        " info = os.lstat(sys.argv[1])\n"
-        "except FileNotFoundError:\n"
-        " raise SystemExit(3)\n"
-        "except OSError as error:\n"
-        " print(f'{type(error).__name__}: {error}', file=sys.stderr)\n"
-        " raise SystemExit(2)\n"
-        "print(json.dumps({'mode': info.st_mode, 'uid': info.st_uid, 'gid': info.st_gid,"
-        " 'nlink': info.st_nlink, 'size': info.st_size}))\n"
-    )
-    result = subprocess.run(
-        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", probe, str(path)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, timeout=10, check=False)
-    if result.returncode == 3:
-        return None
-    if result.returncode != 0:
-        raise RuntimeError(f"privileged read-only path inspection failed for {path.name}: "
-                           f"{result.stderr.strip()}")
-    return json.loads(result.stdout)
-
-
-def root_read_file(path: pathlib.Path, *, limit: int) -> bytes:
-    """Read one bounded protected regular file for a CI assertion only."""
-    reader = (
-        "import os, stat, sys\n"
-        "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
-        "try:\n"
-        " info = os.fstat(fd)\n"
-        " if not stat.S_ISREG(info.st_mode) or info.st_size > int(sys.argv[2]):\n"
-        "  raise SystemExit('protected file is not a bounded regular file')\n"
-        " data = bytearray()\n"
-        " while True:\n"
-        "  block = os.read(fd, min(65536, int(sys.argv[2]) + 1 - len(data)))\n"
-        "  if not block: break\n"
-        "  data.extend(block)\n"
-        "  if len(data) > int(sys.argv[2]):\n"
-        "   raise SystemExit('protected file exceeds its read bound')\n"
-        " sys.stdout.buffer.write(data)\n"
-        "finally:\n"
-        " os.close(fd)\n"
-    )
-    result = subprocess.run(
-        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", reader,
-         str(path), str(limit)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, timeout=10, check=False)
-    if result.returncode:
-        detail = result.stderr.decode(errors="replace").strip()
-        raise RuntimeError(f"privileged bounded read failed for {path.name}: {detail}")
-    return result.stdout
-
-
 def assert_absent(path: pathlib.Path) -> None:
-    if root_lstat(path) is not None:
+    if SINGLETON_CI.protected_path_lstat(path) is not None:
         raise RuntimeError(f"fresh hosted profile target already exists; preserving it: {path}")
 
 
@@ -139,8 +82,8 @@ def assert_kvm() -> None:
             "named profile qualification requires real readable/writable KVM")
 
 
-def create_signed_bundle(candidate: pathlib.Path, directory: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path,
-                                                                                 pathlib.Path, pathlib.Path]:
+def create_signed_bundle(sha: str, directory: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path,
+                                                                     pathlib.Path, pathlib.Path]:
     private_key = directory / "ephemeral-profile-signing-key.pem"
     public_key = directory / "ephemeral-profile-signing-key.pub.pem"
     bundle_path = directory / "profile-control.tar"
@@ -159,7 +102,7 @@ def create_signed_bundle(candidate: pathlib.Path, directory: pathlib.Path) -> tu
     with bundle_path.open("wb") as output:
         with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive:
             for relative, mode in entries:
-                payload = (candidate / relative).read_bytes()
+                payload = SINGLETON_CI.git_object_bytes(sha, relative)
                 info = tarfile.TarInfo(relative)
                 info.mode = mode
                 info.uid = info.gid = 0
@@ -236,28 +179,26 @@ def cleanup_profile(owner_uid: int, sha: str) -> None:
     instance = CONTROL._instance(PROFILE_NAME, owner_uid, sha)
     unit_file = pathlib.Path("/etc/systemd/system") / instance.vm_unit
     proxy_file = pathlib.Path("/etc/systemd/system") / instance.proxy_unit
-    for path in (unit_file, proxy_file):
-        try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            continue
-        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != 0 or info.st_gid != 0
-                or stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1):
+    unit_files = {path: SINGLETON_CI.protected_path_lstat(path)
+                  for path in (unit_file, proxy_file)}
+    for path, info in unit_files.items():
+        if info is not None and (not stat.S_ISREG(info["mode"])
+                or info["uid"] != 0 or info["gid"] != 0
+                or stat.S_IMODE(info["mode"]) != 0o644 or info["nlink"] != 1):
             raise RuntimeError(f"preserving changed profile service unit during cleanup: {path}")
-    if not unit_file.exists() and not proxy_file.exists():
+    if all(info is None for info in unit_files.values()):
         print("profile_cleanup=PASS no_profile_unit=true")
         return
-    if unit_file.exists():
+    if unit_files[unit_file] is not None:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", instance.vm_unit],
             timeout=60, check=False)
-    if proxy_file.exists():
+    if unit_files[proxy_file] is not None:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", instance.proxy_unit],
             timeout=30, check=False)
     for unit in (instance.vm_unit, instance.proxy_unit):
-        result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show",
-                      "--property=ActiveState", "--value", unit], check=False, timeout=10)
-        require(result.returncode == 0 and result.stdout.strip() in ("inactive", "failed"),
+        state = SINGLETON_CI.service_state(unit)
+        require(state.get("ActiveState") in ("inactive", "failed")
+                and state.get("MainPID") == "0",
                 f"named profile service remains active after hosted cleanup: {unit}")
     print("profile_cleanup=PASS stopped=true persistent_profile_state=retained")
 
@@ -297,10 +238,12 @@ def qualification() -> None:
         else:
             raise RuntimeError(f"preserving pre-existing disposable service group: {username}")
 
-    run([str(REPO / "tools/vm-owner-acceptance"), "--install",
-         "--sha", sha, "--prefix", str(CI_INSTALL_PREFIX),
-         "--repo", str(REPO)], timeout=180)
-    require(candidate.is_dir(), "owner candidate installer did not publish the pinned runtime")
+    SINGLETON_CI.install_pinned_candidate(sha, timeout=180, command_runner=run)
+    candidate_info = SINGLETON_CI.protected_path_lstat(candidate)
+    require(candidate_info is not None and stat.S_ISDIR(candidate_info["mode"])
+            and candidate_info["uid"] == 0 and candidate_info["gid"] == 0
+            and stat.S_IMODE(candidate_info["mode"]) == 0o755,
+            "owner candidate installer did not publish the protected pinned runtime")
     print(f"profile_candidate_install=PASS sha={sha} owner={owner.pw_name}")
 
     # Enroll the owner and install fixed host prerequisites through the same
@@ -313,15 +256,14 @@ def qualification() -> None:
     with tempfile.TemporaryDirectory(prefix="lm-profile-signing-",
                                      dir=os.environ.get("RUNNER_TEMP")) as raw_temp:
         temp = pathlib.Path(raw_temp)
-        _, public_key, bundle, signature = create_signed_bundle(candidate, temp)
+        _, public_key, bundle, signature = create_signed_bundle(sha, temp)
         run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-o", "root", "-g", "root",
              "-m", "0644", str(public_key), str(TRUST_KEY)], timeout=15)
         run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I",
              str(candidate / "tools/vm-system-install"), "--install-profile-control",
              "--bundle", str(bundle), "--signature", str(signature)], timeout=90)
-        require(CONTROL_HELPER.is_file() and CONTROL_SUDOERS.is_file(),
-                "signed helper installation did not publish its exact control files")
-        print("profile_control_install=PASS signature=ephemeral-ed25519 key=runner-only")
+        SINGLETON_CI.verify_profile_control_assets(sha)
+        print("profile_control_signature=PASS signature=ephemeral-ed25519 key=runner-only")
 
         env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": owner.pw_dir,
                "LANG": "C", "LC_ALL": "C", "TERM": "xterm-256color"}
@@ -329,7 +271,7 @@ def qualification() -> None:
              "--prefix", str(CI_INSTALL_PREFIX)],
             timeout=600, env=env)
         mapping_path = pathlib.Path("/etc/little-mester-vm/profiles") / PROFILE_NAME / "profile.json"
-        mapping = json.loads(root_read_file(mapping_path, limit=1024 * 1024))
+        mapping = json.loads(SINGLETON_CI.protected_file_bytes(mapping_path, limit=1024 * 1024))
         require(mapping.get("state") == "ready" and mapping.get("transaction") is None
                 and mapping.get("runtime", {}).get("sha") == sha
                 and mapping.get("provisioning", {}).get("artifacts", {}).get("disk", {}).get("virtual_size")
@@ -348,17 +290,15 @@ def qualification() -> None:
 
         states = []
         for unit in (instance.vm_unit, instance.proxy_unit):
-            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show",
-                          "--property=ActiveState", "--value", unit], timeout=10)
-            states.append(result.stdout.strip())
+            states.append(SINGLETON_CI.service_state(unit).get("ActiveState"))
         require(all(state in ("inactive", "failed") for state in states),
                 f"profile services did not stop cleanly: {states}")
         persistent_files = (instance.disk, instance.seed, mapping_path)
         for path in persistent_files:
-            info = root_lstat(path)
+            info = SINGLETON_CI.protected_path_lstat(path)
             require(info is not None and stat.S_ISREG(info["mode"]),
                     f"profile down removed or changed persistent file: {path.name}")
-        require(root_lstat(instance.proxy_port_file) is None,
+        require(SINGLETON_CI.protected_path_lstat(instance.proxy_port_file) is None,
                 "profile proxy port marker remained after down")
         print("profile_down=PASS systemd_stopped=true persistent_disk_and_seed=retained")
 

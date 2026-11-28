@@ -325,6 +325,17 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn('"--prefix", str(CI_INSTALL_PREFIX)', profile_harness)
         self.assertIn("candidate = CI_INSTALL_PARENT / sha", profile_harness)
         self.assertIn("str(candidate / \"tools/vm-system-install\")", profile_harness)
+        self.assertIn("SINGLETON_CI.protected_path_lstat", profile_harness)
+        self.assertIn("SINGLETON_CI.protected_file_bytes", profile_harness)
+        self.assertIn("SINGLETON_CI.verify_profile_control_assets(sha)", profile_harness)
+        self.assertIn("SINGLETON_CI.install_pinned_candidate(sha, timeout=180, command_runner=run)",
+                      profile_harness)
+        self.assertIn("SINGLETON_CI.service_state(unit)", profile_harness)
+        self.assertIn("result = SINGLETON_CI.run(", profile_harness)
+        self.assertNotIn("def root_lstat", profile_harness)
+        self.assertNotIn("def root_read_file", profile_harness)
+        self.assertNotIn("CONTROL_SUDOERS.is_file()", profile_harness)
+        self.assertNotIn("CONTROL_HELPER.is_file()", profile_harness)
         self.assertEqual(transient.count("if: always()"), 1)
         self.assertNotIn("needs:", transient + diagnostics + production + profile)
         self.assertNotIn("steps.smoke_cleanup", production)
@@ -477,28 +488,33 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_sudoers_preflight_uses_root_lstat_and_absence_is_the_only_allow(self):
         dest = unit.PROTECTED_PREFLIGHT_PATH
         command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
-                   unit.PROTECTED_PREFLIGHT_CHECK, dest]
+                   unit.PROTECTED_LSTAT_SCRIPT, dest]
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
                 "GITHUB_SHA": "c" * 40, "RUNNER_TEMP": temp,
                 "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
         }), mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
-                returncode=1)) as run:
+                returncode=3, stdout="", stderr="")) as run:
             unit.fixed_name_preflight(paths=(dest,), users=(), groups=(),
                                       install_parent=pathlib.Path(temp) / "v3")
         run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
-                                    stdout=unit.subprocess.DEVNULL,
-                                    stderr=unit.subprocess.DEVNULL, timeout=5, check=False)
+                                    stdout=unit.subprocess.PIPE,
+                                    stderr=unit.subprocess.PIPE, text=True,
+                                    timeout=10, check=False)
 
         # lstat succeeds for any directory entry, including a symlink; status 0
         # must always preserve it rather than treating it as absent.
-        for code, message in ((0, "pre-existing fixed system VM path"),
-                              (2, "unable to safely inspect fixed system VM path"),
-                              (127, "unable to safely inspect fixed system VM path")):
+        present = {"mode": stat.S_IFREG | 0o644, "uid": 0, "gid": 0,
+                   "nlink": 1, "size": 1, "device": 1, "inode": 1}
+        for code, stdout, message in (
+                (0, json.dumps(present), "pre-existing fixed system VM path"),
+                (2, "", "unable to safely inspect fixed system VM path"),
+                (127, "", "unable to safely inspect fixed system VM path")):
             with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
                     "GITHUB_SHA": "c" * 40, "RUNNER_TEMP": temp,
                     "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
             }), mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
-                    returncode=code)), self.assertRaisesRegex(RuntimeError, message):
+                    returncode=code, stdout=stdout, stderr="")), \
+                    self.assertRaisesRegex(RuntimeError, message):
                 unit.fixed_name_preflight(paths=(dest,), users=(), groups=(),
                                           install_parent=pathlib.Path(temp) / "v3")
 
@@ -520,6 +536,74 @@ class HostedSystemUnitTests(unittest.TestCase):
             run.assert_not_called()
             exists.assert_any_call(ordinary)
             is_symlink.assert_any_call(ordinary)
+
+    def test_shared_protected_path_helpers_use_bounded_fixed_root_probes(self):
+        path = pathlib.Path("/etc/sudoers.d/protected-test")
+        metadata = {"mode": stat.S_IFREG | 0o440, "uid": 0, "gid": 0,
+                    "nlink": 1, "size": 7, "device": 1, "inode": 2}
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps(metadata), stderr="")) as run:
+            self.assertEqual(unit.protected_path_lstat(path), metadata)
+        run.assert_called_once_with(
+            ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+             unit.PROTECTED_LSTAT_SCRIPT, str(path)],
+            stdin=unit.subprocess.DEVNULL, stdout=unit.subprocess.PIPE,
+            stderr=unit.subprocess.PIPE, text=True, timeout=10, check=False)
+
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=b"raw\x00bytes", stderr=b"")) as run:
+            self.assertEqual(unit.protected_file_bytes(path, limit=32), b"raw\x00bytes")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:6], ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+                                       unit.PROTECTED_READ_SCRIPT])
+        self.assertEqual(command[-2:], [str(path), "32"])
+        self.assertIn("O_NOFOLLOW", unit.PROTECTED_READ_SCRIPT)
+        self.assertIn("O_NONBLOCK", unit.PROTECTED_READ_SCRIPT)
+        self.assertIn("info.st_nlink != 1", unit.PROTECTED_READ_SCRIPT)
+
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=3, stdout="", stderr="")):
+            self.assertIsNone(unit.protected_path_lstat(path))
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=1, stdout=b"", stderr=b"protected read refused")), \
+                self.assertRaisesRegex(RuntimeError, "privileged bounded read failed"):
+            unit.protected_file_bytes(path, limit=32)
+
+    def test_profile_control_install_reuses_exact_asset_and_sudoers_verification(self):
+        sha = "e" * 40
+        assets = unit.PROFILE_CONTROL_INSTALL_ASSETS
+        payloads = {destination: f"pinned:{source}".encode()
+                    for destination, (source, _mode) in assets.items()}
+
+        def inspect(path):
+            mode = assets[str(path)][1]
+            return {"mode": stat.S_IFREG | mode, "uid": 0, "gid": 0,
+                    "nlink": 1, "size": len(payloads[str(path)]),
+                    "device": 1, "inode": 2}
+
+        with mock.patch.object(unit, "protected_path_lstat", side_effect=inspect) as lstat, \
+                mock.patch.object(unit, "protected_file_bytes",
+                                  side_effect=lambda path, *, limit: payloads[str(path)]) as read, \
+                mock.patch.object(unit, "git_object_bytes",
+                                  side_effect=lambda _sha, source: f"pinned:{source}".encode()) as git, \
+                mock.patch.object(unit, "verify_sudoers_file") as sudoers:
+            unit.verify_profile_control_assets(sha)
+        self.assertEqual(lstat.call_count, len(assets))
+        self.assertEqual(read.call_count, len(assets))
+        self.assertEqual(git.call_count, len(assets))
+        sudoers.assert_called_once_with("/etc/sudoers.d/little-mester-vm-profile-control")
+
+    def test_candidate_install_command_is_shared_and_timeout_is_parameterized(self):
+        sha = "f" * 40
+        expected = [str(unit.REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
+                    "--prefix", str(unit.CI_INSTALL_PREFIX), "--repo", str(unit.REPO)]
+        completed = SimpleNamespace(returncode=0)
+        runner = mock.Mock(return_value=completed)
+        self.assertIs(unit.install_pinned_candidate(sha, timeout=180,
+                                                   command_runner=runner), completed)
+        runner.assert_called_once_with(expected, timeout=180)
+        with self.assertRaisesRegex(RuntimeError, "full exact commit SHA"):
+            unit.install_pinned_candidate("not-a-sha", command_runner=runner)
 
     def test_sudoers_bytes_use_only_the_fixed_read_only_sudo_cat(self):
         payload = b"%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service\n"
@@ -2192,7 +2276,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             'SendSIGKILL=yes',
             'production_unit_forced_stop=PASS',
             'production_unit_stopped=PASS',
-            'installed_asset_bytes(dest)',
+            'installed = installed_asset_bytes(destination)',
             '"--system-vm", "down"',
             'invoke_verified_cleanup(sha)',
         ):
