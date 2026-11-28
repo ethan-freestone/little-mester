@@ -208,7 +208,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       shift
       vm_operation="${1:-}"
       [[ -n "$vm_operation" ]] || {
-        echo "Usage: ./lab vm {up [--dir PATH] [--unsafe-recurse] [--reassign]|down|status|ssh|auth|tui|verify|accept|prepare-dependencies} [OPTIONS]" >&2
+        echo "Usage: ./lab vm {up [--dir PATH] [--unsafe-recurse] [--reassign]|down|status|ssh|auth|tui|verify|accept|profile {install|up|down|status|ssh} NAME|prepare-dependencies} [OPTIONS]" >&2
         exit 2
       }
       shift
@@ -216,6 +216,26 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         scope="${1:-production}"
         [[ $# -eq 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
         exec "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$scope"
+      fi
+      if [[ "$vm_operation" == "profile" ]]; then
+        profile_operation="${1:-}"
+        profile_name="${2:-}"
+        [[ "$profile_operation" =~ ^(install|up|down|status|ssh)$ && \
+           "$profile_name" =~ ^[a-z][a-z0-9-]{0,31}$ && $# -eq 2 ]] || {
+          echo "Usage: ./lab vm profile {install|up|down|status|ssh} NAME" >&2
+          exit 2
+        }
+        if [[ "$profile_operation" == install || "$profile_operation" == up || \
+              "$profile_operation" == ssh ]]; then
+          "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies production
+        fi
+        profile_args=(--profile-operation "$profile_operation" --profile-name "$profile_name")
+        if [[ "$profile_operation" == install ]]; then
+          profile_sha="$(/usr/bin/git -C "$LAB_DIR" rev-parse --verify HEAD)" \
+            || die "cannot resolve the pinned profile runtime commit"
+          profile_args+=(--sha "$profile_sha" --repo "$LAB_DIR")
+        fi
+        exec "$LAB_DIR/tools/vm-owner-acceptance" "${profile_args[@]}"
       fi
       case "$vm_operation" in
         up|down|status|ssh|auth|tui|verify|accept) ;;

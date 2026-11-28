@@ -7,6 +7,7 @@ import grp
 import hashlib
 import fcntl
 import importlib.util
+import io
 import os
 import pathlib
 import pwd
@@ -16,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 
 
 FILES = {
@@ -36,6 +38,8 @@ FILES = {
     "sudoers/little-mester-vm": ("/etc/sudoers.d/little-mester-vm", 0o440),
     "lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py", 0o644),
     "lib/vm/vm-instance.py": ("/usr/lib/little-mester-vm/vm-instance.py", 0o644),
+    "lib/vm/profile-control-core.py":
+        ("/usr/lib/little-mester-vm/profile-control-core.py", 0o644),
     "lib/vm/system-vm-workspace.py": ("/usr/lib/little-mester-vm/system-vm-workspace.py", 0o644),
     "lib/vm/system-vm-metrics.py": ("/usr/lib/little-mester-vm/system-vm-metrics.py", 0o644),
     "lib/vm/parent-metrics.py": ("/usr/lib/little-mester-vm/parent-metrics.py", 0o644),
@@ -103,6 +107,7 @@ UPDATE_ADDITIONALS = frozenset({
     "lib/vm/system-vm-workspace.py",
     "lib/vm/system-vm-metrics.py",
     "lib/vm/vm-instance.py",
+    "lib/vm/profile-control-core.py",
     "lib/vm/parent-metrics.py",
     "lib/vm/parent-metrics-collect.py",
     "lib/vm/guest-compatibility.py",
@@ -126,6 +131,7 @@ PERMANENT_INTERLOCK_RELATIVES = frozenset({
     "sudoers/little-mester-vm",
     "lib/vm/system-vm.py",
     "lib/vm/vm-instance.py",
+    "lib/vm/profile-control-core.py",
     "lib/vm/system-vm-workspace.py",
     "lib/vm/system-vm-metrics.py",
     "lib/vm/parent-metrics.py",
@@ -156,6 +162,19 @@ SYSTEM_UNITS = (
 CODE_UPDATE_LOCK = pathlib.Path("/etc/little-mester-vm/code-update.lock")
 CODE_UPDATE_MARKER = pathlib.Path("/etc/little-mester-vm/code-update.in-progress")
 CODE_ROLLBACK_ROOT = pathlib.Path("/var/lib/little-mester-vm-code-rollback")
+PROFILE_CONTROL_TRUST_KEY = pathlib.Path("/etc/little-mester-vm/profile-control-trust.pem")
+OWNER_RECORD = pathlib.Path("/etc/little-mester-vm/profile-control-owner.json")
+PROFILE_CONTROL_HELPER = pathlib.Path("/usr/libexec/little-mester-vm/profile-control")
+PROFILE_CONTROL_SUDOERS = pathlib.Path("/etc/sudoers.d/little-mester-vm-profile-control")
+PROFILE_CONTROL_SUDOERS_BYTES = (
+    b"# Signed, fixed owner protocol for the minimum named-profile lifecycle.\n"
+    b"%lm-vm-control ALL=(root) NOPASSWD: "
+    b"/usr/libexec/little-mester-vm/profile-control \"\"\n"
+)
+PROFILE_CONTROL_BUNDLE_FILES = {
+    "lib/vm/profile-control.py": (PROFILE_CONTROL_HELPER, 0o755),
+    "sudoers/little-mester-vm-profile-control": (PROFILE_CONTROL_SUDOERS, 0o440),
+}
 
 
 def refuse(message: str) -> None:
@@ -196,7 +215,8 @@ def source_root() -> pathlib.Path:
 
 
 def verify_source(root: pathlib.Path) -> None:
-    for relative in (*FILES, "tools/vm-system-install", "lib/vm/code-update-transaction.py"):
+    for relative in (*FILES, "tools/vm-system-install", "lib/vm/code-update-transaction.py",
+                     "lib/vm/profile-control.py", "sudoers/little-mester-vm-profile-control"):
         path = root / relative
         for parent in path.parents:
             if parent == root.parent:
@@ -209,6 +229,163 @@ def verify_source(root: pathlib.Path) -> None:
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
                 or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
             refuse("system VM install source is not a protected regular file")
+
+
+def _read_bundle_input(raw_path: str, *, limit: int) -> bytes:
+    path = pathlib.Path(raw_path)
+    if not path.is_absolute() or ".." in path.parts:
+        refuse("signed profile-control input must use an absolute path without traversal")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise RuntimeError("signed profile-control input is unavailable") from error
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            refuse("signed profile-control input has an unsafe type or exceeds its fixed bound")
+        chunks = bytearray()
+        while block := os.read(fd, min(65536, limit + 1 - len(chunks))):
+            chunks.extend(block)
+            if len(chunks) > limit:
+                refuse("signed profile-control input exceeds its fixed bound")
+        return bytes(chunks)
+    finally:
+        os.close(fd)
+
+
+def _verify_profile_control_bundle(bundle: bytes, signature: bytes) -> dict[str, bytes]:
+    """Verify one exact Ed25519-signed helper bundle against the enrolled key."""
+    key_path = PROFILE_CONTROL_TRUST_KEY
+    try:
+        key_info = os.lstat(key_path)
+    except OSError as error:
+        raise RuntimeError("administrator-enrolled profile-control signing key is unavailable") from error
+    if (not stat.S_ISREG(key_info.st_mode) or stat.S_ISLNK(key_info.st_mode)
+            or key_info.st_uid != 0 or key_info.st_gid != 0
+            or stat.S_IMODE(key_info.st_mode) != 0o644 or key_info.st_nlink != 1):
+        refuse("administrator-enrolled profile-control signing key has unsafe metadata")
+    if not bundle or len(bundle) > 2 * 1024 * 1024 or len(signature) != 64:
+        refuse("signed profile-control bundle or detached signature has an invalid size")
+    current = pathlib.Path("/")
+    for component in ("usr", "bin", "openssl"):
+        current /= component
+        info = os.lstat(current)
+        if (stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("fixed OpenSSL verifier path is not protected")
+    if not stat.S_ISREG(info.st_mode) or not os.access(current, os.X_OK):
+        refuse("fixed OpenSSL signature verifier is unavailable")
+    key_type = subprocess.run(
+        ["/usr/bin/openssl", "pkey", "-pubin", "-in", str(key_path), "-text", "-noout"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=15, check=False)
+    if key_type.returncode or not key_type.stdout.startswith(b"ED25519 Public-Key:"):
+        refuse("profile-control trust key must be an enrolled Ed25519 public key")
+    bundle_fd = signature_fd = None
+    try:
+        bundle_fd = os.memfd_create("lm-profile-control-bundle", os.MFD_CLOEXEC)
+        signature_fd = os.memfd_create("lm-profile-control-signature", os.MFD_CLOEXEC)
+        os.write(bundle_fd, bundle)
+        os.write(signature_fd, signature)
+        os.lseek(bundle_fd, 0, os.SEEK_SET)
+        os.lseek(signature_fd, 0, os.SEEK_SET)
+        result = subprocess.run(
+            ["/usr/bin/openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(key_path),
+             "-sigfile", f"/proc/self/fd/{signature_fd}", "-rawin", "-in",
+             f"/proc/self/fd/{bundle_fd}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=False, close_fds=True, pass_fds=(bundle_fd, signature_fd))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("profile-control bundle signature verification could not run") from error
+    finally:
+        for fd in (bundle_fd, signature_fd):
+            if fd is not None:
+                os.close(fd)
+    if result.returncode:
+        refuse("profile-control bundle signature is not valid under the enrolled key")
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(bundle), mode="r:")
+        members = archive.getmembers()
+        if len(members) != len(PROFILE_CONTROL_BUNDLE_FILES):
+            refuse("signed profile-control bundle has an unexpected member count")
+        payloads: dict[str, bytes] = {}
+        for member in members:
+            if (member.name not in PROFILE_CONTROL_BUNDLE_FILES or not member.isfile()
+                    or member.issym() or member.islnk() or member.size > 1024 * 1024
+                    or stat.S_IMODE(member.mode) != PROFILE_CONTROL_BUNDLE_FILES[member.name][1]
+                    or member.name in payloads):
+                refuse("signed profile-control bundle contains an unsafe or unexpected member")
+            source = archive.extractfile(member)
+            if source is None:
+                refuse("signed profile-control bundle member could not be read")
+            payloads[member.name] = source.read(member.size + 1)
+            if len(payloads[member.name]) != member.size:
+                refuse("signed profile-control bundle member has a malformed length")
+        if set(payloads) != set(PROFILE_CONTROL_BUNDLE_FILES):
+            refuse("signed profile-control bundle does not contain the exact fixed inventory")
+        if payloads["sudoers/little-mester-vm-profile-control"] != PROFILE_CONTROL_SUDOERS_BYTES:
+            refuse("signed profile-control sudoers bytes differ from the exact owner protocol")
+        return payloads
+    except (tarfile.TarError, OSError) as error:
+        raise RuntimeError("signed profile-control bundle is not a readable tar archive") from error
+
+
+def install_profile_control(root: pathlib.Path, owner: str,
+                            bundle_path: str, signature_path: str) -> None:
+    """Install the minimum signed owner helper without altering singleton units."""
+    if os.geteuid() != 0:
+        refuse("signed profile-control installation requires root")
+    try:
+        control_group = grp.getgrnam("lm-vm-control")
+    except KeyError as error:
+        raise RuntimeError("fixed VM control group is unavailable") from error
+    lock_fd = _ensure_code_update_lock(control_group.gr_gid)
+    try:
+        _install_profile_control_locked(root, owner, bundle_path, signature_path,
+                                        control_group=control_group)
+    finally:
+        _release_code_update_lock(lock_fd)
+
+
+def _install_profile_control_locked(root: pathlib.Path, owner: str,
+                                    bundle_path: str, signature_path: str,
+                                    *, control_group) -> None:
+    if CODE_UPDATE_MARKER.exists() or CODE_UPDATE_MARKER.is_symlink():
+        refuse("signed profile-control installation is blocked by an incomplete code update")
+    try:
+        owner_info = pwd.getpwnam(owner)
+    except KeyError as error:
+        raise RuntimeError("fixed VM owner is unavailable") from error
+    if owner_info.pw_uid == 0:
+        refuse("root cannot be enrolled as the profile-control owner")
+    if owner not in control_group.gr_mem and owner_info.pw_gid != control_group.gr_gid:
+        refuse("profile-control owner must already be enrolled in lm-vm-control")
+    bundle = _read_bundle_input(bundle_path, limit=2 * 1024 * 1024)
+    signature = _read_bundle_input(signature_path, limit=64)
+    payloads = _verify_profile_control_bundle(bundle, signature)
+    if payloads["lib/vm/profile-control.py"] != (root / "lib/vm/profile-control.py").read_bytes():
+        refuse("signed profile-control helper does not match the exact pinned candidate")
+    ensure_dir(pathlib.Path("/usr/libexec/little-mester-vm"), group="root", mode=0o755)
+    install_file(root / "lib/vm/profile-control.py", PROFILE_CONTROL_HELPER, 0o755,
+                 payload=payloads["lib/vm/profile-control.py"])
+    install_file(root / "sudoers/little-mester-vm-profile-control",
+                 PROFILE_CONTROL_SUDOERS, 0o440,
+                 payload=payloads["sudoers/little-mester-vm-profile-control"])
+    owner_payload = (json.dumps({"schema_version": 1, "uid": owner_info.pw_uid},
+                                sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    if OWNER_RECORD.exists() or OWNER_RECORD.is_symlink():
+        info = os.lstat(OWNER_RECORD)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1 or OWNER_RECORD.read_bytes() != owner_payload):
+            refuse("preserving pre-existing profile-control owner enrollment")
+    else:
+        install_file(root / "lib/vm/profile-control.py", OWNER_RECORD, 0o600,
+                     payload=owner_payload)
+    subprocess.run(["/usr/sbin/visudo", "-cf", str(PROFILE_CONTROL_SUDOERS)],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=15, check=True)
+    print("Installed the signed minimum named-profile control helper; no profile was started.")
 
 
 def ensure_group(name: str, *, allowed_members: set[str] = frozenset()) -> None:
@@ -335,16 +512,31 @@ def preflight(root: pathlib.Path, owner: str) -> None:
 
     for raw, allowed in (
         ("/etc/little-mester-vm", {pathlib.Path(path).name for path in PROVISION_FINALS[2:]} |
-         {"workspace.json"}),
+         {"workspace.json", "profiles", PROFILE_CONTROL_TRUST_KEY.name, OWNER_RECORD.name}),
         ("/var/lib/little-mester-vm",
          {pathlib.Path(PROVISION_FINALS[0]).name, pathlib.Path(PROVISION_FINALS[1]).name,
-          *(pathlib.Path(path).name for path in PROVISION_PARTIALS)}),
+          *(pathlib.Path(path).name for path in PROVISION_PARTIALS), "profiles", "bases"}),
     ):
         directory = pathlib.Path(raw)
         if directory.is_dir() and not directory.is_symlink():
             unexpected = {entry.name for entry in directory.iterdir()} - allowed
             if unexpected:
                 refuse(f"unexpected fixed system VM state exists; preserving {directory}")
+
+    for path, uid, gid, mode, kind in (
+            (OWNER_RECORD, 0, 0, 0o600, "file"),
+            (PROFILE_CONTROL_TRUST_KEY, 0, 0, 0o644, "file"),
+            (pathlib.Path("/etc/little-mester-vm/profiles"), 0, 0, 0o700, "directory"),
+            (pathlib.Path("/var/lib/little-mester-vm/profiles"), 0, 0, 0o711, "directory"),
+            (pathlib.Path("/var/lib/little-mester-vm/bases"), 0, 0, 0o755, "directory")):
+        if not path.exists() and not path.is_symlink():
+            continue
+        info = os.lstat(path)
+        valid_type = stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
+        if (not valid_type or stat.S_ISLNK(info.st_mode) or info.st_uid != uid
+                or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode
+                or (kind == "file" and info.st_nlink != 1)):
+            refuse(f"preserving profile-control state with unsafe metadata: {path}")
 
     artifacts = (*PROVISION_FINALS, *PROVISION_PARTIALS)
     if any(pathlib.Path(path).exists() or pathlib.Path(path).is_symlink()
@@ -960,8 +1152,10 @@ def main() -> int:
         args = sys.argv[1:]
         update_mode = len(args) == 3 and args[0] == "--update-code-only" and args[1] == "--previous-sha"
         rollback_mode = len(args) == 3 and args[0] == "--rollback-code-only" and args[1] == "--candidate-sha"
-        if args and not (update_mode or rollback_mode):
-            refuse("supported operations are fresh install, --update-code-only --previous-sha SHA, or --rollback-code-only --candidate-sha SHA")
+        profile_control_mode = (len(args) == 5 and args[0] == "--install-profile-control"
+                                and args[1] == "--bundle" and args[3] == "--signature")
+        if args and not (update_mode or rollback_mode or profile_control_mode):
+            refuse("supported operations are fresh install, code-only update/rollback, or signed --install-profile-control --bundle PATH --signature PATH")
         root = source_root()
         verify_source(root)
         owner = os.environ.get("SUDO_USER", "")
@@ -976,6 +1170,9 @@ def main() -> int:
         if rollback_mode:
             rollback_code_only(root, owner, args[2])
             print("Code-only rollback complete. VM state was preserved; services remain stopped.")
+            return 0
+        if profile_control_mode:
+            install_profile_control(root, owner, args[2], args[4])
             return 0
         try:
             kvm_gid = grp.getgrnam("kvm").gr_gid

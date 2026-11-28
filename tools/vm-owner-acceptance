@@ -80,6 +80,8 @@ INSTALL_FILES = {
     "lib/vm/parent-supervisor.py": 0o644,
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
+    "lib/vm/profile-control-core.py": 0o644,
+    "lib/vm/profile-control.py": 0o644,
     "lib/vm/system-vm.py": 0o644,
     "lib/vm/vm-instance.py": 0o644,
     "lib/vm/system-vm-workspace.py": 0o644,
@@ -102,6 +104,7 @@ INSTALL_FILES = {
     "systemd/little-mester-vm-metrics.service": 0o644,
     # Candidate source is public deployment policy; deployed sudoers remains 0440.
     "sudoers/little-mester-vm": 0o444,
+    "sudoers/little-mester-vm-profile-control": 0o444,
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
@@ -232,6 +235,48 @@ def owner_system_vm(root: pathlib.Path, operation: str, *, approve_lifecycle: bo
     result = subprocess.run([str(root / "lab-vm"), "system", operation],
                             stdin=None if operation in ("ssh", "auth", "tui") else subprocess.DEVNULL,
                             env=env, check=False)
+    return result.returncode
+
+
+PROFILE_CONTROL_ENTRY = pathlib.Path("/usr/libexec/little-mester-vm/profile-control")
+
+
+def owner_profile(operation: str, name: str, *, repository: pathlib.Path | None = None,
+                  sha: str | None = None) -> int:
+    """Submit the bounded named-profile protocol to the signed fixed helper."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name):
+        raise GateError("BLOCKED", "profile name is outside the fixed grammar")
+    reserved = {"system", "profiles", "installations", "prune", "bootstrap", "control",
+                "prepare-dependencies"}
+    if name in reserved:
+        raise GateError("BLOCKED", "profile name is reserved")
+    if operation == "install":
+        if repository is None or sha is None:
+            raise GateError("BLOCKED", "profile install requires a pinned candidate repository and SHA")
+        candidate_commit(repository, sha)
+        target = install_path(sha)
+        if target.exists() or target.is_symlink():
+            verify_install(repository, sha)
+        else:
+            install_candidate(repository, sha)
+        request = {"schema_version": 1, "operation": operation,
+                   "name": name, "runtime_sha": sha}
+    elif operation in ("up", "down", "status", "ssh"):
+        request = {"schema_version": 1, "operation": operation, "name": name}
+    else:
+        raise GateError("BLOCKED", "unsupported named profile operation")
+    payload = (json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    env = clean_env()
+    term = os.environ.get("TERM", "")
+    if (operation == "ssh" and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term)
+            and subprocess.run(["/usr/bin/infocmp", "-1", term],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, check=False).returncode == 0):
+        env["TERM"] = term
+    result = subprocess.run([SUDO, "-n", str(PROFILE_CONTROL_ENTRY)],
+                            input=payload, env=env, check=False)
+    if result.returncode:
+        raise GateError("BLOCKED", "signed named-profile control request was refused")
     return result.returncode
 
 
@@ -2370,6 +2415,9 @@ def parser() -> argparse.ArgumentParser:
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
     modes.add_argument("--system-vm", choices=("verify", "accept", "up", "down", "status", "ssh", "auth", "tui"),
                        help="verify read-only, explicitly accept the fixed VM lifecycle, or run one fixed operation")
+    p.add_argument("--profile-operation", choices=("install", "up", "down", "status", "ssh"),
+                   help="run the minimum signed named-profile lifecycle operation")
+    p.add_argument("--profile-name", help="validated named-profile selector")
     p.add_argument("--prepare-dependencies", choices=("production", "acceptance", "system-install"),
                    help="check host requirements and, with separate approval, install supported missing packages")
     p.add_argument("--approve-system-vm-lifecycle", action="store_true",
@@ -2411,6 +2459,28 @@ def load_host_dependencies():
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     workflow_modes = ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept")
+    if args.profile_operation or args.profile_name:
+        if (not args.profile_operation or not args.profile_name or args.system_vm
+                or args.approve_system_vm_lifecycle or args.workspace_dir
+                or args.unsafe_recurse or args.reassign
+                or args.milestone or args.workspace or args.model or args.run_id or args.debug
+                or any(getattr(args, name) for name in workflow_modes)
+                or args.prepare_dependencies):
+            parser().error("--profile-operation and --profile-name must be used together without another mode")
+        if args.profile_operation == "install":
+            if not args.sha or not args.repo:
+                parser().error("--profile-operation install requires --sha and --repo")
+            if args.prefix is not None and args.prefix != INSTALL_PARENT.parent:
+                parser().error("named profile runtime installs use the fixed /opt/little-mester prefix")
+        elif args.sha or args.repo or args.prefix is not None:
+            parser().error("profile lifecycle operations other than install do not accept --sha, --repo, or --prefix")
+        try:
+            repo = pathlib.Path(args.repo).resolve(strict=True) if args.repo else None
+            return owner_profile(args.profile_operation, args.profile_name,
+                                 repository=repo, sha=args.sha)
+        except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            print(f"BLOCKED: named profile owner command refused ({error})", file=sys.stderr)
+            return 3
     if args.prepare_dependencies and (
             args.system_vm or args.approve_system_vm_lifecycle or args.sha or args.repo
             or args.workspace_dir or args.unsafe_recurse or args.reassign
