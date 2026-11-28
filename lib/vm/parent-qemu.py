@@ -7,6 +7,7 @@ import fcntl
 import os
 import re
 import stat
+import sys
 
 
 def _port(value: int, name: str) -> None:

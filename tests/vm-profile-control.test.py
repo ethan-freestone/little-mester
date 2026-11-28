@@ -15,8 +15,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest import mock
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -211,6 +211,59 @@ class SignedBundleTests(unittest.TestCase):
     def test_sudoers_source_matches_exact_installed_policy(self):
         self.assertEqual(self.payloads["sudoers/little-mester-vm-profile-control"],
                          INSTALLER.PROFILE_CONTROL_SUDOERS_BYTES)
+
+    def test_signed_control_install_enrolls_candidate_runtime_root(self):
+        bundle = self.bundle()
+        signature = self.sign(bundle)
+        bundle_path = self.directory / "bundle.tar"
+        signature_path = self.directory / "bundle.sig"
+        runtime_root = self.directory / "v3"
+        candidate = runtime_root / ("a" * 40)
+        helper_source = candidate / "lib/vm/profile-control.py"
+        helper_source.parent.mkdir(parents=True)
+        helper_source.write_bytes(self.payloads["lib/vm/profile-control.py"])
+        owner_record = self.directory / "profile-control-owner.json"
+        marker = self.directory / "missing-code-update-marker"
+        owner = SimpleNamespace(pw_uid=1001, pw_gid=1001)
+        control_group = SimpleNamespace(gr_gid=991, gr_mem=["test-owner"])
+        real_lstat = os.lstat
+        real_run = subprocess.run
+
+        def fake_lstat(path, *args, **kwargs):
+            if pathlib.Path(path) == self.public_key:
+                return os.stat_result((stat.S_IFREG | 0o644, 1, 1, 1, 0, 0, 0,
+                                       0, 0, 0))
+            return real_lstat(path, *args, **kwargs)
+
+        def run_with_test_visudo(argv, *args, **kwargs):
+            if argv[0] == "/usr/sbin/visudo":
+                return subprocess.CompletedProcess(argv, 0)
+            return real_run(argv, *args, **kwargs)
+
+        with (mock.patch.object(INSTALLER.os, "geteuid", return_value=0),
+              mock.patch.object(INSTALLER.grp, "getgrnam", return_value=control_group),
+              mock.patch.object(INSTALLER.pwd, "getpwnam", return_value=owner),
+              mock.patch.object(INSTALLER, "_ensure_code_update_lock", return_value=42),
+              mock.patch.object(INSTALLER, "_release_code_update_lock"),
+              mock.patch.object(INSTALLER, "CODE_UPDATE_MARKER", marker),
+              mock.patch.object(INSTALLER, "PROFILE_CONTROL_TRUST_KEY", self.public_key),
+              mock.patch.object(INSTALLER, "OWNER_RECORD", owner_record),
+              mock.patch.object(INSTALLER.os, "lstat", side_effect=fake_lstat),
+              mock.patch.object(INSTALLER, "ensure_dir"),
+              mock.patch.object(INSTALLER, "install_file") as install_file,
+              mock.patch.object(INSTALLER.subprocess, "run", side_effect=run_with_test_visudo)):
+            INSTALLER.install_profile_control(
+                candidate, "test-owner", str(bundle_path), str(signature_path))
+
+        owner_record_calls = [call for call in install_file.call_args_list
+                              if call.args[1] == owner_record]
+        self.assertEqual(len(owner_record_calls), 1)
+        self.assertEqual(owner_record_calls[0].args[2], 0o600)
+        self.assertEqual(json.loads(owner_record_calls[0].kwargs["payload"]), {
+            "schema_version": 2,
+            "uid": owner.pw_uid,
+            "runtime_root": str(runtime_root),
+        })
 
 
 if __name__ == "__main__":

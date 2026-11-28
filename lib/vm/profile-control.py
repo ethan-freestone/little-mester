@@ -18,7 +18,6 @@ import pwd
 import grp
 import re
 import select
-import signal
 import socket
 import stat
 import struct
@@ -26,6 +25,7 @@ import subprocess
 import sys
 import time
 import uuid
+from typing import TypedDict
 
 
 FIXED_LIB = pathlib.Path("/usr/lib/little-mester-vm")
@@ -59,6 +59,12 @@ PROFILE_RUNTIME_FILES = {
 
 class Refused(RuntimeError):
     """A host/profile identity or lifecycle check failed closed."""
+
+
+class OwnerEnrollment(TypedDict):
+    schema_version: int
+    uid: int
+    runtime_root: str
 
 
 def _load_module(name: str, path: pathlib.Path):
@@ -202,7 +208,7 @@ def _read_bounded(path: pathlib.Path, *, uid: int, mode: int, limit: int) -> byt
         os.close(fd)
 
 
-def _read_owner_record() -> dict[str, int | str]:
+def _read_owner_record() -> OwnerEnrollment:
     try:
         info = os.lstat(OWNER_RECORD)
     except OSError as error:
@@ -226,7 +232,8 @@ def _read_owner_record() -> dict[str, int | str]:
             or str(runtime_root) != os.path.normpath(str(runtime_root))
             or ".." in runtime_root.parts or os.path.realpath(runtime_root) != str(runtime_root)):
         raise Refused("profile-control enrollment has an invalid protected runtime root")
-    return record
+    return OwnerEnrollment(schema_version=record["schema_version"], uid=record["uid"],
+                           runtime_root=record["runtime_root"])
 
 
 def _runtime_root() -> pathlib.Path:
@@ -647,7 +654,6 @@ def _verify_unit_bytes(unit: str, expected: bytes) -> None:
 
 def _install_profile(name: str, runtime_sha: str, caller_uid: int) -> None:
     _require_owner(caller_uid)
-    runtime_manifest = _runtime_manifest(runtime_sha)
     lock_fd = _take_code_lock()
     try:
         _install_profile_locked(name, runtime_sha, caller_uid)
@@ -657,6 +663,7 @@ def _install_profile(name: str, runtime_sha: str, caller_uid: int) -> None:
 
 def _install_profile_locked(name: str, runtime_sha: str, caller_uid: int) -> None:
     _require_owner(caller_uid)
+    runtime_manifest = _runtime_manifest(runtime_sha)
     _check_empty_catalog()
     if caller_uid <= 0:
         raise Refused("profile owner UID is outside the accepted range")
@@ -851,7 +858,7 @@ def _verify_artifacts(core, mapping: dict, instance) -> tuple[int, int, int]:
                          digest=artifacts["known_hosts"]["sha256"])
         for fd in fds:
             os.set_inheritable(fd, True)
-        return tuple(fds)  # caller closes only if it does not exec
+        return disk_fd, base_fd, seed_fd  # caller closes only if it does not exec
     except BaseException:
         for fd in fds:
             try:

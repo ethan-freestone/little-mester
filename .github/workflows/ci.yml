@@ -366,22 +366,23 @@ jobs:
         timeout-minutes: 2
         run: python3 tests/ci-kvm-profile.py --cleanup
 
-  # ── 8. Hygiene — ShellCheck, Python compile, ruff lint ───────────
+  # ── 8. Hygiene — ShellCheck and shared Python validation ────────
   hygiene:
     name: Code quality
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
       - name: ShellCheck (lab + shell scripts)
         run: shellcheck lab scripts/*.sh
 
-      - name: Python compile check (scripts/*.py)
-        run: python3 -m py_compile scripts/*.py
-
-      - name: Install ruff and lint Python
-        run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
+      - name: Install development-only Python validation tools
+        run: pip install --target=/tmp/.python-validation ruff mypy
+      - name: Validate all Python sources
+        run: PATH="/tmp/.python-validation/bin:$PATH" python3 scripts/validate-python.py
+        env:
+          PYTHONPATH: /tmp/.python-validation
       - name: Validate GitHub Actions workflows
         run: scripts/check-workflows.sh
 

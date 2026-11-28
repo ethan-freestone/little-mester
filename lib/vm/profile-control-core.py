@@ -11,6 +11,7 @@ import pathlib
 import re
 import stat
 import sys
+from types import ModuleType
 import uuid
 
 
@@ -146,7 +147,7 @@ def mapping_schema() -> dict:
     }
 
 
-def _reject_duplicate_pairs(pairs):
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result = {}
     for key, value in pairs:
         if key in result:
@@ -349,7 +350,7 @@ def validate_mapping(value: object, *, expected_name: str | None = None,
     return record
 
 
-def _instance_policy():
+def _instance_policy() -> ModuleType:
     path = pathlib.Path(__file__).with_name("vm-instance.py")
     spec = importlib.util.spec_from_file_location("profile_control_vm_instance", path)
     if spec is None or spec.loader is None:
@@ -362,7 +363,7 @@ def _instance_policy():
 
 def instance_from_mapping(value: object, *, expected_name: str | None = None,
                           expected_owner_uid: int | None = None,
-                          require_ready: bool = False):
+                          require_ready: bool = False) -> object:
     record = validate_mapping(value, expected_name=expected_name,
                               expected_owner_uid=expected_owner_uid,
                               require_ready=require_ready)
