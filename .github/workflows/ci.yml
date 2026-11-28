@@ -327,6 +327,14 @@ jobs:
         if: always()
         timeout-minutes: 2
         run: python3 tests/ci-kvm-profile.py --cleanup
+      - name: Upload bounded profile failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vm-profile-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/little-mester-profile-failure-diagnostics.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── 8. Hygiene — ShellCheck and shared Python validation ────────
   hygiene:

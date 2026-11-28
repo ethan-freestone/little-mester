@@ -17,10 +17,8 @@ import pathlib
 import pwd
 import grp
 import re
-import select
 import socket
 import stat
-import struct
 import subprocess
 import sys
 import time
@@ -38,7 +36,6 @@ CODE_LOCK = CONFIG / "code-update.lock"
 CODE_MARKER = CONFIG / "code-update.in-progress"
 OWNER_RECORD = CONFIG / "profile-control-owner.json"
 MAX_REQUEST = 4096
-MAX_SSH_WAIT = 900.0
 QMP_STOP_SECONDS = 18.0
 PROFILE_BASE_MANIFEST = hashlib.sha256(
     b"little-mester-approved-noble-base-v1\0"
@@ -94,6 +91,11 @@ def _provision():
 
 def _qemu():
     return _load_module("profile_control_qemu_runtime", _lib_path("parent-qemu.py"))
+
+
+def _system_vm():
+    """Load the installed singleton lifecycle helper used by profile units."""
+    return _load_module("profile_control_system_vm_lifecycle", _lib_path("system-vm.py"))
 
 
 def _safe_root_dir(path: pathlib.Path, *, uid: int = 0, gid: int = 0,
@@ -469,25 +471,18 @@ def _seed_profile(instance, *, owner_uid: int) -> None:
         raise Refused("generated profile client public key is malformed")
     if any(character in host_private for character in ("\0", "\r")):
         raise Refused("generated profile host private key is malformed")
-    private_block = "\n".join("      " + line for line in host_private.rstrip("\n").splitlines())
-    user_data = (
-        "#cloud-config\n"
-        "users:\n"
-        "  - default\n"
-        "  - name: mester\n"
-        "    gecos: Little Mester\n"
-        "    groups: [adm]\n"
-        "    shell: /bin/bash\n"
-        "    lock_passwd: true\n"
-        "    ssh_authorized_keys:\n"
-        f"      - {client_public}\n"
-        "disable_root: true\n"
-        "ssh_pwauth: false\n"
-        "ssh_keys:\n"
-        "  ed25519_private: |\n"
-        f"{private_block}\n"
-        f"  ed25519_public: {host_public}\n"
-    ).encode("ascii")
+    bootstrap = _load_module("profile_guest_bootstrap", _lib_path("guest-bootstrap.py"))
+    contract = _load_module("profile_parent_session_contract",
+                            _lib_path("parent-session-contract.py"))
+    user_data = bootstrap.build_foundation(
+        name=f"little-mester-profile-{instance.name}", uid=1000,
+        ssh_key=client_public, workspace="disk",
+        helper="/usr/local/libexec/lm-guest-user-dirs.py")
+    contract.add_protected_session(
+        user_data, host_private=host_private, host_public=host_public,
+        control_public=client_public, workspace_path=contract.DEFAULT_WORKSPACE)
+    user_data_bytes = b"#cloud-config\n" + json.dumps(
+        user_data, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n"
     meta_data = (f"instance-id: little-mester-profile-{instance.name}\n"
                  f"local-hostname: little-mester-profile-{instance.name}\n").encode("ascii")
     user_data_path = instance.vm_state / "user-data"
@@ -496,7 +491,7 @@ def _seed_profile(instance, *, owner_uid: int) -> None:
     for path in (user_data_path, meta_data_path, seed_part, instance.seed):
         if path.exists() or path.is_symlink():
             raise Refused(f"preserving pre-existing profile seed evidence: {path.name}")
-    user_data_path.write_bytes(user_data)
+    user_data_path.write_bytes(user_data_bytes)
     meta_data_path.write_bytes(meta_data)
     for path in (user_data_path, meta_data_path):
         os.chown(path, vm.pw_uid, vm.pw_gid, follow_symlinks=False)
@@ -531,8 +526,10 @@ def _write_units(instance) -> None:
         f"Description=Little Mester named VM profile {instance.name}\n"
         f"Requires={proxy}\nAfter={proxy}\nBindsTo={proxy}\n\n"
         "[Service]\nType=exec\n"
-        f"ExecStart=/usr/bin/python3 -I {helper} service qemu {instance.name}\n"
-        f"ExecStop=/usr/bin/python3 -I {helper} service qmp-stop {instance.name} $MAINPID\n"
+        f"User={instance.owner_uid}\n"
+        f"ExecStart=!/usr/bin/python3 -I {helper} service qemu {instance.name}\n"
+        f"ExecStartPost=!/usr/bin/python3 -I {helper} service guest-ready {instance.name} $MAINPID\n"
+        f"ExecStop=!/usr/bin/python3 -I {helper} service qmp-stop {instance.name} $MAINPID\n"
         "Restart=no\nKillMode=control-group\nKillSignal=SIGTERM\n"
         "TimeoutStartSec=16min\nTimeoutStopSec=25s\nSendSIGKILL=yes\n"
         "DevicePolicy=closed\nDeviceAllow=/dev/kvm rw\nNoNewPrivileges=yes\n"
@@ -541,7 +538,8 @@ def _write_units(instance) -> None:
         "ProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\n"
         "LockPersonality=yes\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
         f"ReadOnlyPaths={instance.base_path} {instance.seed}\n"
-        f"ReadWritePaths={instance.disk} {instance.qmp_runtime} {CODE_LOCK}\n"
+        f"ReadWritePaths={instance.disk} {instance.qmp_runtime} "
+        f"{_profile_readiness_runtime(instance)} {CODE_LOCK}\n"
     ).encode("ascii")
     proxy_text = (
         "[Unit]\n"
@@ -607,8 +605,10 @@ def _expected_unit_text(instance, *, role: str) -> bytes:
             f"Requires={instance.proxy_unit}\nAfter={instance.proxy_unit}\n"
             f"BindsTo={instance.proxy_unit}\n\n"
             "[Service]\nType=exec\n"
-            f"ExecStart=/usr/bin/python3 -I {helper} service qemu {instance.name}\n"
-            f"ExecStop=/usr/bin/python3 -I {helper} service qmp-stop {instance.name} $MAINPID\n"
+            f"User={instance.owner_uid}\n"
+            f"ExecStart=!/usr/bin/python3 -I {helper} service qemu {instance.name}\n"
+            f"ExecStartPost=!/usr/bin/python3 -I {helper} service guest-ready {instance.name} $MAINPID\n"
+            f"ExecStop=!/usr/bin/python3 -I {helper} service qmp-stop {instance.name} $MAINPID\n"
             "Restart=no\nKillMode=control-group\nKillSignal=SIGTERM\n"
             "TimeoutStartSec=16min\nTimeoutStopSec=25s\nSendSIGKILL=yes\n"
             "DevicePolicy=closed\nDeviceAllow=/dev/kvm rw\nNoNewPrivileges=yes\n"
@@ -617,7 +617,8 @@ def _expected_unit_text(instance, *, role: str) -> bytes:
             "ProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\n"
             "LockPersonality=yes\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
             f"ReadOnlyPaths={instance.base_path} {instance.seed}\n"
-            f"ReadWritePaths={instance.disk} {instance.qmp_runtime} {CODE_LOCK}\n"
+            f"ReadWritePaths={instance.disk} {instance.qmp_runtime} "
+            f"{_profile_readiness_runtime(instance)} {CODE_LOCK}\n"
         ).encode("ascii")
     if role == "proxy":
         return (
@@ -883,6 +884,118 @@ def _ensure_runtime_dirs(instance) -> None:
             _safe_root_dir(path, uid=user.pw_uid, gid=user.pw_gid, mode=0o700)
         else:
             _mkdir(path, uid=user.pw_uid, gid=user.pw_gid, mode=0o700)
+    owner = pwd.getpwuid(instance.owner_uid)
+    readiness_runtime = _profile_readiness_runtime(instance)
+    if readiness_runtime.exists() or readiness_runtime.is_symlink():
+        _safe_root_dir(readiness_runtime, uid=owner.pw_uid, gid=owner.pw_gid, mode=0o700)
+    else:
+        _mkdir(readiness_runtime, uid=owner.pw_uid, gid=owner.pw_gid, mode=0o700)
+
+
+def _profile_readiness_runtime(instance) -> pathlib.Path:
+    """Profile-private /run directory for short-lived readiness credentials."""
+    return instance.qmp_runtime.parent / "readiness"
+
+
+def _read_profile_ssh_artifact(path: pathlib.Path, *, uid: int, gid: int,
+                               expected_identity: tuple[int, int], limit: int,
+                               expected_digest: str | None = None) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f"profile SSH credential is unavailable: {path.name}") from error
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_gid != gid
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != expected_identity
+                or info.st_size < 0 or info.st_size > limit):
+            raise Refused(f"profile SSH credential identity or size is unsafe: {path.name}")
+        data = bytearray()
+        while block := os.read(fd, min(4096, limit + 1 - len(data))):
+            data.extend(block)
+            if len(data) > limit:
+                raise Refused(f"profile SSH credential exceeds its fixed bound: {path.name}")
+        if expected_digest is not None and hashlib.sha256(data).hexdigest() != expected_digest:
+            raise Refused(f"profile SSH credential digest differs from its protected mapping: {path.name}")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _write_readiness_credential(path: pathlib.Path, payload: bytes, *, uid: int,
+                                gid: int) -> None:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600)
+    except OSError as error:
+        raise Refused(f"preserving pre-existing readiness credential: {path.name}") from error
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise Refused("readiness credential write made no progress")
+            view = view[written:]
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _prepare_guest_readiness_credentials(instance, mapping: dict) -> None:
+    owner_uid = mapping["owner_uid"]
+    owner = pwd.getpwuid(owner_uid)
+    runtime = _profile_readiness_runtime(instance)
+    _safe_root_dir(runtime, uid=owner_uid, gid=owner.pw_gid, mode=0o700)
+    if os.listdir(runtime):
+        raise Refused("preserving pre-existing profile readiness credential evidence")
+    artifacts = mapping["provisioning"]["artifacts"]
+    client = artifacts["client_private"]
+    known_hosts = artifacts["known_hosts"]
+    identity_data = _read_profile_ssh_artifact(
+        instance.control_key, uid=owner_uid, gid=owner.pw_gid,
+        expected_identity=(client["device"], client["inode"]), limit=16 * 1024)
+    known_data = _read_profile_ssh_artifact(
+        instance.known_hosts, uid=owner_uid, gid=owner.pw_gid,
+        expected_identity=(known_hosts["device"], known_hosts["inode"]),
+        limit=4096, expected_digest=known_hosts["sha256"])
+    try:
+        _write_readiness_credential(runtime / "identity", identity_data,
+                                    uid=owner_uid, gid=owner.pw_gid)
+        _write_readiness_credential(runtime / "known_hosts", known_data,
+                                    uid=owner_uid, gid=owner.pw_gid)
+        directory_fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        _remove_readiness_credentials(runtime, expected_uid=owner_uid, expected_gid=owner.pw_gid)
+        raise
+
+
+def _remove_readiness_credentials(runtime: pathlib.Path, *, expected_uid: int,
+                                  expected_gid: int) -> None:
+    try:
+        _safe_root_dir(runtime, uid=expected_uid, gid=expected_gid, mode=0o700)
+        names = set(os.listdir(runtime))
+    except FileNotFoundError:
+        return
+    if names - {"identity", "known_hosts"}:
+        raise Refused("preserving unexpected profile readiness runtime evidence")
+    for name in ("identity", "known_hosts"):
+        path = runtime / name
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != expected_uid or info.st_gid != expected_gid
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise Refused("preserving changed profile readiness credential evidence")
+        os.unlink(path)
 
 
 def _proxy_port_ready(instance) -> None:
@@ -969,6 +1082,81 @@ def _service_qemu(name: str) -> None:
         raise
 
 
+def _service_guest_ready(name: str, pid_text: str) -> None:
+    """Run the singleton's bounded guest gate for this exact profile MainPID."""
+    if os.geteuid() != 0 or not re.fullmatch(r"[1-9][0-9]{0,8}", pid_text):
+        raise Refused("invalid fixed profile readiness request")
+    _core, mapping, instance = _load_profile(name)
+    _verify_unit_bytes(instance.vm_unit, _expected_unit_text(instance, role="vm"))
+    owner_uid = mapping["owner_uid"]
+    owner = pwd.getpwuid(owner_uid)
+    lifecycle = _system_vm()
+    readiness_runtime = _profile_readiness_runtime(instance)
+    ssh_options = {
+        "ssh_port": instance.ssh_port,
+        "identity_file": readiness_runtime / "identity",
+        "known_hosts": readiness_runtime / "known_hosts",
+        "expected_identity_uid": owner_uid,
+        "runtime_directory": readiness_runtime,
+        "expected_runtime_uid": owner_uid,
+    }
+    pidfd = lifecycle._open_qemu_readiness_pidfd(
+        int(pid_text), expected_uid=None)
+    # $MAINPID is supplied by this fixed unit, whose ExecStart validated and
+    # launched the QEMU binary. Bind liveness to that pidfd, then drop to the
+    # enrolled owner before opening the already-staged SSH identity.
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                       "HOME": owner.pw_dir, "LANG": "C", "LC_ALL": "C"})
+    try:
+        _drop_privileges(owner, [])
+        _safe_root_dir(readiness_runtime, uid=owner_uid, gid=owner.pw_gid, mode=0o700)
+        _require_regular(ssh_options["identity_file"], uid=owner_uid,
+                         gid=owner.pw_gid, mode=0o600)
+        _require_regular(ssh_options["known_hosts"], uid=owner_uid,
+                         gid=owner.pw_gid, mode=0o600)
+        lifecycle._ensure_guest_ready(
+            qemu_pidfd=pidfd, expected_qemu_uid=None,
+            guest_ssh_options=ssh_options, workspace_path="/home/mester/workspace",
+            verify_workspace_mount=False,
+            timeout_seconds=lifecycle.SSH_READY_TIMEOUT)
+    finally:
+        try:
+            _remove_readiness_credentials(
+                readiness_runtime, expected_uid=owner_uid, expected_gid=owner.pw_gid)
+        finally:
+            os.close(pidfd)
+
+
+def _service_qmp_stop(name: str, pid_text: str) -> None:
+    if os.geteuid() != 0 or not re.fullmatch(r"[1-9][0-9]{0,8}", pid_text):
+        raise Refused("invalid fixed profile QMP stop request")
+    _core, mapping, instance = _load_profile(name)
+    _verify_unit_bytes(instance.vm_unit, _expected_unit_text(instance, role="vm"))
+    lifecycle = _system_vm()
+    vm_user = pwd.getpwuid(mapping["accounts"]["vm"]["uid"])
+    _drop_privileges(vm_user, [])
+    lifecycle.qmp_powerdown_and_wait(
+        int(pid_text), timeout_seconds=QMP_STOP_SECONDS,
+        qmp_runtime=instance.qmp_runtime, qmp_socket_path=instance.qmp_socket,
+        service_uid=mapping["accounts"]["vm"]["uid"])
+
+
+def _service_qmp_status(name: str, pid_text: str) -> None:
+    """Emit only the fixed, allowlisted QMP status fields for CI diagnostics."""
+    if os.geteuid() != 0 or not re.fullmatch(r"[1-9][0-9]{0,8}", pid_text):
+        raise Refused("invalid fixed profile QMP observation request")
+    _core, mapping, instance = _load_profile(name)
+    _verify_unit_bytes(instance.vm_unit, _expected_unit_text(instance, role="vm"))
+    lifecycle = _system_vm()
+    observation = lifecycle.qmp_query_status(
+        int(pid_text), qmp_runtime=instance.qmp_runtime,
+        qmp_socket_path=instance.qmp_socket,
+        service_uid=mapping["accounts"]["vm"]["uid"], timeout_seconds=2.0)
+    print("profile_qmp_status=" + json.dumps(observation, sort_keys=True,
+                                             separators=(",", ":")), flush=True)
+
+
 def _service_proxy(name: str) -> None:
     if os.geteuid() != 0:
         raise Refused("profile proxy service entrypoint must be invoked by its fixed systemd unit")
@@ -990,111 +1178,6 @@ def _service_proxy(name: str) -> None:
     os.execv("/usr/bin/python3", ["/usr/bin/python3", "-I", str(proxy_path),
                                    "--port-file", str(port_file),
                                    "--port", str(instance.proxy_port)])
-
-
-def _recv_qmp_line(client: socket.socket, deadline: float, buffer: bytearray) -> dict:
-    while b"\n" not in buffer:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise Refused("profile QMP exchange exceeded its bounded deadline")
-        client.settimeout(remaining)
-        chunk = client.recv(min(4096, 65536 - len(buffer)))
-        if not chunk:
-            raise Refused("profile QMP peer closed before completing its response")
-        buffer.extend(chunk)
-        if len(buffer) > 65536:
-            raise Refused("profile QMP response exceeded its fixed bound")
-    line, _, remainder = buffer.partition(b"\n")
-    buffer[:] = remainder
-    try:
-        value = json.loads(line)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise Refused("profile QMP peer returned malformed JSON") from error
-    if not isinstance(value, dict):
-        raise Refused("profile QMP peer returned an invalid message")
-    return value
-
-
-def _service_qmp_stop(name: str, pid_text: str) -> None:
-    if os.geteuid() != 0 or not re.fullmatch(r"[1-9][0-9]{0,8}", pid_text):
-        raise Refused("invalid fixed profile QMP stop request")
-    _core_mapping, mapping, instance = _load_profile(name)
-    vm_uid = mapping["accounts"]["vm"]["uid"]
-    _ensure_runtime_dirs(instance)
-    try:
-        socket_info = os.lstat(instance.qmp_socket)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != vm_uid:
-        raise Refused("profile QMP socket has an unsafe type or owner")
-    pid = int(pid_text)
-    if not hasattr(os, "pidfd_open"):
-        raise Refused("pidfd support is required for bounded profile shutdown")
-    try:
-        pidfd = os.pidfd_open(pid, 0)
-    except OSError as error:
-        if error.errno == 3:
-            return
-        raise Refused("could not bind profile shutdown to systemd MainPID") from error
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    deadline = time.monotonic() + QMP_STOP_SECONDS
-    try:
-        client.settimeout(2.0)
-        client.connect(str(instance.qmp_socket))
-        peer = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-        if peer[0] != pid or peer[1] != vm_uid:
-            raise Refused("profile QMP peer differs from the exact VM MainPID identity")
-        buffer = bytearray()
-        if not isinstance(_recv_qmp_line(client, deadline, buffer).get("QMP"), dict):
-            raise Refused("profile QMP peer did not send its protocol greeting")
-        for command in ("qmp_capabilities", "system_powerdown"):
-            client.settimeout(max(0.1, deadline - time.monotonic()))
-            client.sendall((json.dumps({"execute": command}, separators=(",", ":")) + "\r\n").encode())
-            while True:
-                response = _recv_qmp_line(client, deadline, buffer)
-                if "event" in response:
-                    continue
-                if "error" in response or not isinstance(response.get("return"), dict):
-                    raise Refused("profile QMP rejected its fixed graceful-shutdown command")
-                break
-        poller = select.poll()
-        poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
-        remaining = max(0, int((deadline - time.monotonic()) * 1000))
-        if not poller.poll(remaining):
-            raise Refused("profile guest did not stop after QMP powerdown")
-    except (OSError, TimeoutError) as error:
-        raise Refused("profile QMP graceful shutdown could not be completed") from error
-    finally:
-        client.close()
-        os.close(pidfd)
-
-
-def _ssh_argv(instance, *, identity_file: pathlib.Path | None = None,
-              known_hosts: pathlib.Path | None = None, tty: bool = False) -> list[str]:
-    identity_file = instance.control_key if identity_file is None else identity_file
-    known_hosts = instance.known_hosts if known_hosts is None else known_hosts
-    return ["/usr/bin/ssh", *( ["-tt"] if tty else []), "-F", "/dev/null", "-p", str(instance.ssh_port),
-            "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
-            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
-            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "IdentitiesOnly=yes",
-            "-o", f"IdentityFile={identity_file}", "-o", "HostKeyAlgorithms=ssh-ed25519",
-            "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519", "-o", "CheckHostIP=no",
-            "-o", "UpdateHostKeys=no", "-o", "ClearAllForwardings=yes",
-            "mester@127.0.0.1"]
-
-
-def _wait_for_ssh(instance) -> None:
-    deadline = time.monotonic() + MAX_SSH_WAIT
-    last = None
-    while time.monotonic() < deadline:
-        result = subprocess.run([*_ssh_argv(instance), "true"], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                timeout=8, check=False)
-        if result.returncode == 0:
-            return
-        last = result.returncode
-        time.sleep(2)
-    raise Refused(f"named profile guest did not become SSH-ready within the fixed bound (last={last})")
 
 
 def _systemd_state(unit: str) -> str:
@@ -1242,11 +1325,16 @@ def _owner_operation(operation: str, name: str, runtime_sha: str | None, caller_
         _ensure_runtime_dirs(instance)
         _verify_unit_bytes(instance.vm_unit, _expected_unit_text(instance, role="vm"))
         _verify_unit_bytes(instance.proxy_unit, _expected_unit_text(instance, role="proxy"))
-        result = subprocess.run(["/usr/bin/systemctl", "start", instance.vm_unit],
-                                stdin=subprocess.DEVNULL, timeout=1000, check=False)
+        _prepare_guest_readiness_credentials(instance, mapping)
+        try:
+            result = subprocess.run(["/usr/bin/systemctl", "start", instance.vm_unit],
+                                    stdin=subprocess.DEVNULL, timeout=1000, check=False)
+        finally:
+            _remove_readiness_credentials(
+                _profile_readiness_runtime(instance), expected_uid=mapping["owner_uid"],
+                expected_gid=pwd.getpwuid(mapping["owner_uid"]).pw_gid)
         if result.returncode:
             raise Refused("named profile VM failed to start; profile evidence was retained")
-        _wait_for_ssh(instance)
         print(f"Named profile {name} is running and passed strict host-key-pinned SSH readiness.")
         return 0
     if operation == "down":
@@ -1277,8 +1365,11 @@ def _owner_operation(operation: str, name: str, runtime_sha: str | None, caller_
                 os.close(tty)
         _drop_privileges(owner, [])
         try:
-            result = subprocess.run([*_ssh_argv(instance, identity_file=staged_key,
-                                                  known_hosts=staged_known, tty=True), "/bin/bash -l"],
+            lifecycle = _system_vm()
+            ssh_argv = lifecycle.guest_ssh_argv(
+                ssh_port=instance.ssh_port, identity_file=staged_key,
+                known_hosts=staged_known, tty=True)
+            result = subprocess.run([*ssh_argv, "/bin/bash -l"],
                                     stdin=None, check=False)
             return result.returncode
         finally:
@@ -1344,6 +1435,14 @@ def main(argv: list[str] | None = None) -> int:
             if (len(argv) == 4 and argv[0] == "service" and argv[1] == "qmp-stop"
                     and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2])):
                 _service_qmp_stop(argv[2], argv[3])
+                return 0
+            if (len(argv) == 4 and argv[0] == "service" and argv[1] == "guest-ready"
+                    and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2])):
+                _service_guest_ready(argv[2], argv[3])
+                return 0
+            if (len(argv) == 4 and argv[0] == "service" and argv[1] == "qmp-status"
+                    and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2])):
+                _service_qmp_status(argv[2], argv[3])
                 return 0
             raise Refused("unsupported fixed profile service invocation")
         request = _read_request()

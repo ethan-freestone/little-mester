@@ -508,6 +508,9 @@ def sanitize_diagnostic_output(value: str) -> str:
                     re.DOTALL), "[REDACTED PRIVATE KEY BLOCK]"),
         (re.compile(r"-----BEGIN [^\r\n]*PRIVATE KEY-----.*\Z", re.DOTALL),
          "[REDACTED INCOMPLETE PRIVATE KEY BLOCK]"),
+        (re.compile(r"(?m)\bssh-(?:ed25519|rsa|ecdsa-[A-Za-z0-9-]+)\s+"
+                    r"[A-Za-z0-9+/]{32,}={0,2}(?:\s+[^\r\n]+)?"),
+         "[REDACTED SSH KEY]"),
         (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
         (re.compile(r"(?im)\b(password|passwd|token|secret|authorization|api[_-]?key)"
                     r"\b(\s*[=:]\s*)(?:\".*?\"|'.*?'|[^\r\n,;]*)", re.DOTALL),

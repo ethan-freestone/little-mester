@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import importlib.machinery
+import hashlib
 import io
 import json
 import os
 import pathlib
+import pwd
 import stat
 import subprocess
 import sys
@@ -75,13 +77,121 @@ class RequestTests(unittest.TestCase):
 
     def test_ssh_is_fixed_to_loopback_and_ed25519_without_remote_options(self):
         instance = CONTROL._instance("dev", 1000, "a" * 40)
-        argv = CONTROL._ssh_argv(instance, tty=True)
+        lifecycle = CONTROL._system_vm()
+        argv = lifecycle.guest_ssh_argv(
+            ssh_port=instance.ssh_port, identity_file=instance.control_key,
+            known_hosts=instance.known_hosts, tty=True)
         self.assertIn("-tt", argv)
         self.assertIn("mester@127.0.0.1", argv)
         self.assertIn("HostKeyAlgorithms=ssh-ed25519", argv)
         self.assertIn("StrictHostKeyChecking=yes", argv)
         self.assertEqual(argv[-1], "mester@127.0.0.1")
         self.assertNotIn("-o", argv[argv.index("mester@127.0.0.1") + 1:])
+
+    def test_profile_vm_unit_uses_systemd_readiness_and_shared_shutdown(self):
+        instance = CONTROL._instance("dev", 1000, "a" * 40)
+        unit = CONTROL._expected_unit_text(instance, role="vm").decode("ascii")
+        self.assertIn("User=1000\n", unit)
+        self.assertIn("ExecStart=!/usr/bin/python3 -I /usr/libexec/little-mester-vm/profile-control service qemu dev\n",
+                      unit)
+        self.assertIn("ExecStartPost=!/usr/bin/python3 -I /usr/libexec/little-mester-vm/profile-control service guest-ready dev $MAINPID\n",
+                      unit)
+        self.assertIn("ExecStop=!/usr/bin/python3 -I /usr/libexec/little-mester-vm/profile-control service qmp-stop dev $MAINPID\n",
+                      unit)
+        readiness = CONTROL._profile_readiness_runtime(instance)
+        self.assertIn(f"ReadWritePaths={instance.disk} {instance.qmp_runtime} {readiness} {CONTROL.CODE_LOCK}\n",
+                      unit)
+        self.assertIn("TimeoutStartSec=16min\nTimeoutStopSec=25s\n", unit)
+
+    def test_readiness_credentials_are_verified_staged_private_and_removed(self):
+        with tempfile.TemporaryDirectory(prefix="lm-profile-readiness-") as temporary:
+            root = pathlib.Path(temporary)
+            owner = pwd.getpwuid(os.getuid())
+            profile_runtime = root / "runtime" / "dev"
+            profile_runtime.mkdir(parents=True, mode=0o711)
+            readiness = profile_runtime / "readiness"
+            readiness.mkdir(mode=0o700)
+            identity = root / "control_ed25519"
+            known_hosts = root / "known_hosts"
+            identity.write_bytes(b"private credential bytes\n")
+            known_hosts.write_bytes(b"[127.0.0.1]:22223 ssh-ed25519 AQIDBA==\n")
+            identity.chmod(0o600)
+            known_hosts.chmod(0o600)
+            identity_info = identity.stat()
+            known_info = known_hosts.stat()
+            instance = SimpleNamespace(
+                qmp_runtime=profile_runtime / "vm",
+                control_key=identity, known_hosts=known_hosts)
+            mapping = {
+                "owner_uid": owner.pw_uid,
+                "provisioning": {"artifacts": {
+                    "client_private": {"device": identity_info.st_dev,
+                                       "inode": identity_info.st_ino},
+                    "known_hosts": {"device": known_info.st_dev,
+                                    "inode": known_info.st_ino,
+                                    "sha256": hashlib.sha256(known_hosts.read_bytes()).hexdigest()},
+                }},
+            }
+            CONTROL._prepare_guest_readiness_credentials(instance, mapping)
+            for name, expected in (("identity", b"private credential bytes\n"),
+                                   ("known_hosts", known_hosts.read_bytes())):
+                staged = readiness / name
+                self.assertEqual(staged.read_bytes(), expected)
+                info = staged.stat()
+                self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)),
+                                 (owner.pw_uid, owner.pw_gid, 0o600))
+            CONTROL._remove_readiness_credentials(
+                readiness, expected_uid=owner.pw_uid, expected_gid=owner.pw_gid)
+            self.assertEqual(list(readiness.iterdir()), [])
+
+    def test_profile_seed_uses_shared_foundation_and_protected_session_contract(self):
+        with tempfile.TemporaryDirectory(prefix="lm-profile-seed-") as temporary:
+            root = pathlib.Path(temporary)
+            vm_state = root / "vm"
+            vm_state.mkdir()
+            host_key = vm_state / "ssh_host_ed25519_key"
+            control_key = root / "control_ed25519"
+            host_private = "-----BEGIN OPENSSH PRIVATE KEY-----\nseed-test\n-----END OPENSSH PRIVATE KEY-----\n"
+            host_public = "ssh-ed25519 AQIDBA== profile-host\n"
+            client_public = "ssh-ed25519 BQYHCA== profile-client\n"
+            host_key.write_text(host_private, encoding="ascii")
+            pathlib.Path(str(host_key) + ".pub").write_text(host_public, encoding="ascii")
+            pathlib.Path(str(control_key) + ".pub").write_text(client_public, encoding="ascii")
+            instance = SimpleNamespace(name="dev", vm_user="profile-vm", vm_state=vm_state,
+                                       host_key=host_key, control_key=control_key,
+                                       seed=vm_state / "seed.iso")
+            vm_user = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+            captured = {}
+
+            def fake_genisoimage(argv, **_kwargs):
+                captured["userdata"] = pathlib.Path(argv[-2]).read_bytes()
+                captured["metadata"] = pathlib.Path(argv[-1]).read_bytes()
+                output = pathlib.Path(argv[argv.index("-output") + 1])
+                output.write_bytes(b"test-iso")
+                return SimpleNamespace(returncode=0)
+
+            with (mock.patch.object(CONTROL.pwd, "getpwnam", return_value=vm_user),
+                  mock.patch.object(CONTROL.subprocess, "run", side_effect=fake_genisoimage)):
+                CONTROL._seed_profile(instance, owner_uid=os.getuid())
+
+            bootstrap = CONTROL._load_module(
+                "profile_seed_test_bootstrap", CONTROL._lib_path("guest-bootstrap.py"))
+            contract = CONTROL._load_module(
+                "profile_seed_test_contract", CONTROL._lib_path("parent-session-contract.py"))
+            expected = bootstrap.build_foundation(
+                name="little-mester-profile-dev", uid=1000,
+                ssh_key=client_public.strip(), workspace="disk",
+                helper="/usr/local/libexec/lm-guest-user-dirs.py")
+            contract.add_protected_session(
+                expected, host_private=host_private, host_public=host_public.strip(),
+                control_public=client_public.strip(),
+                workspace_path=contract.DEFAULT_WORKSPACE)
+            self.assertEqual(captured["userdata"], b"#cloud-config\n" + json.dumps(
+                expected, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n")
+            self.assertIn(b"local-hostname: little-mester-profile-dev\n", captured["metadata"])
+            seed_info = instance.seed.stat()
+            self.assertEqual(stat.S_IMODE(seed_info.st_mode), 0o600)
+            self.assertEqual(instance.seed.read_bytes(), b"test-iso")
 
     def test_qemu_service_acquires_exclusive_lock_before_loading_mapping(self):
         order = []

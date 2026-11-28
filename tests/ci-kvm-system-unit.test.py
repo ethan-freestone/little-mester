@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import importlib.util
 import io
 import json
@@ -37,6 +38,11 @@ SYSTEM_ACCEPTANCE_SPEC = importlib.util.spec_from_file_location(
 system_acceptance = importlib.util.module_from_spec(SYSTEM_ACCEPTANCE_SPEC)
 assert SYSTEM_ACCEPTANCE_SPEC.loader is not None
 SYSTEM_ACCEPTANCE_SPEC.loader.exec_module(system_acceptance)
+PROFILE_CI_PATH = ROOT / "tests/ci-kvm-profile.py"
+PROFILE_CI_SPEC = importlib.util.spec_from_file_location("ci_kvm_profile", PROFILE_CI_PATH)
+profile_ci = importlib.util.module_from_spec(PROFILE_CI_SPEC)
+assert PROFILE_CI_SPEC.loader is not None
+PROFILE_CI_SPEC.loader.exec_module(profile_ci)
 
 
 def workflow_job(workflow: str, name: str) -> str:
@@ -2381,15 +2387,55 @@ class HostedSystemUnitTests(unittest.TestCase):
             "token='first line\nsecond secret line'",
             ("-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-bytes\n"
              "-----END OPENSSH PRIVATE KEY-----"),
+            "ssh-ed25519 " + "A" * 48 + " profile-host-key",
             "sk-" + "x" * 32,
         ))
         sanitized = unit.sanitize_diagnostic_output(diagnostic)
         for secret in ("bearer-secret-value", "two words containing a secret",
-                       "second secret line", "private-key-bytes", "sk-" + "x" * 32):
+                       "second secret line", "private-key-bytes", "A" * 48,
+                       "sk-" + "x" * 32):
             self.assertNotIn(secret, sanitized)
         self.assertIn("[REDACTED PRIVATE KEY BLOCK]", sanitized)
         multibyte = unit.sanitize_diagnostic_output("界" * 20_000)
         self.assertLessEqual(len(multibyte.encode("utf-8")), unit.DIAGNOSTIC_OUTPUT_LIMIT)
+
+    def test_profile_failure_artifact_is_bounded_redacted_and_uses_fixed_diagnostics(self):
+        public_key = "ssh-ed25519 " + "A" * 48 + " profile-host-key"
+        private_key = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                       "private-profile-key-material\n"
+                       "-----END OPENSSH PRIVATE KEY-----")
+        sensitive = f"{public_key}\n{private_key}\ntoken=profile-secret-value"
+        commands = []
+
+        def diagnostic(argv):
+            commands.append(list(argv))
+            if "--property=MainPID" in argv:
+                return 0, "4242\n", False
+            return 0, sensitive, False
+
+        instance = profile_ci.CONTROL._instance("ci-profile", os.getuid(), "a" * 40)
+        with tempfile.TemporaryDirectory(prefix="lm-profile-diag-") as temporary:
+            output = io.StringIO()
+            with (mock.patch.dict(os.environ, {"GITHUB_SHA": "a" * 40,
+                                                "RUNNER_TEMP": temporary}),
+                  mock.patch.object(profile_ci.CONTROL, "_instance", return_value=instance),
+                  mock.patch.object(profile_ci.SINGLETON_CI, "bounded_diagnostic_command",
+                                    side_effect=diagnostic),
+                  contextlib.redirect_stdout(output)):
+                profile_ci.report_profile_startup_diagnostics()
+            artifact = pathlib.Path(temporary) / profile_ci.PROFILE_DIAGNOSTIC_NAME
+            payload = artifact.read_text(encoding="utf-8")
+            self.assertLessEqual(artifact.stat().st_size, profile_ci.PROFILE_DIAGNOSTIC_LIMIT)
+            self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+            for secret in ("A" * 48, "private-profile-key-material", "profile-secret-value"):
+                self.assertNotIn(secret, payload)
+            self.assertIn("[REDACTED SSH KEY]", payload)
+            self.assertIn("[REDACTED PRIVATE KEY BLOCK]", payload)
+            self.assertIn("named_profile_failure_diagnostics=BEGIN", output.getvalue())
+            self.assertTrue(commands)
+            self.assertTrue(all("env" not in argv for argv in commands))
+            self.assertTrue(any("journalctl" in " ".join(argv) for argv in commands))
+            self.assertTrue(any("qmp-status" in argv for argv in commands))
 
     def test_startup_diagnostic_command_caps_captured_output(self):
         code, output, truncated = unit.bounded_diagnostic_command([

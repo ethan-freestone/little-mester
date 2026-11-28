@@ -44,6 +44,13 @@ INSTANCE_POLICY = importlib.util.module_from_spec(INSTANCE_POLICY_SPEC)
 sys.modules[INSTANCE_POLICY_SPEC.name] = INSTANCE_POLICY
 INSTANCE_POLICY_SPEC.loader.exec_module(INSTANCE_POLICY)
 INSTANCE = INSTANCE_POLICY.Instance.singleton()
+STAGE_REPORTING_SPEC = importlib.util.spec_from_file_location(
+    "system_vm_stage_reporting", pathlib.Path(__file__).with_name("vm-stage-reporting.py"))
+if STAGE_REPORTING_SPEC is None or STAGE_REPORTING_SPEC.loader is None:
+    raise RuntimeError("shared VM stage reporter is unavailable")
+STAGE_REPORTING = importlib.util.module_from_spec(STAGE_REPORTING_SPEC)
+STAGE_REPORTING_SPEC.loader.exec_module(STAGE_REPORTING)
+StageTimer = STAGE_REPORTING.StageTimer
 
 SERVICE_USER = INSTANCE.vm_user
 PROXY_USER = INSTANCE.proxy_user
@@ -86,6 +93,10 @@ class Refused(RuntimeError):
 
 class GuestSSHTimeout(Refused):
     """A bounded captured guest command timed out; callers may retry by policy."""
+
+    def __init__(self, message: str, *, stderr: bytes = b""):
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def _require_fixed_file(path: pathlib.Path, *, uid: int, mode: int,
@@ -196,14 +207,16 @@ def _locked_service_exec(kind: str, owner: str | None = None) -> None:
         os.close(fd)
 
 
-def _validate_runtime_directory() -> None:
+def _validate_runtime_directory(path: pathlib.Path = QMP_RUNTIME, *,
+                                service_uid: int | None = None) -> None:
     try:
-        info = os.lstat(QMP_RUNTIME)
-        service_uid = pwd.getpwnam(SERVICE_USER).pw_uid
+        info = os.lstat(path)
+        expected_uid = (pwd.getpwnam(SERVICE_USER).pw_uid
+                        if service_uid is None else service_uid)
     except (KeyError, OSError) as error:
         raise Refused("private QMP RuntimeDirectory is unavailable") from error
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != service_uid or stat.S_IMODE(info.st_mode) != 0o700):
+            or info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o700):
         raise Refused("QMP RuntimeDirectory must be private to the dedicated VM service identity")
 
 
@@ -281,20 +294,66 @@ def _recv_qmp_line(client: socket.socket, deadline: float, buffer: bytearray) ->
     return value
 
 
-def qmp_powerdown_and_wait(pid: int, *, timeout_seconds: float = QMP_STOP_TIMEOUT) -> None:
-    """Send identity-bound QMP powerdown and wait for actual QEMU process exit."""
-    if type(pid) is not int or pid <= 1 or not 0 < timeout_seconds <= 20:
-        raise Refused("invalid fixed QMP stop request")
-    _validate_runtime_directory()
+def _open_qmp_peer(pid: int, *, qmp_runtime: pathlib.Path,
+                   qmp_socket_path: pathlib.Path, service_uid: int,
+                   deadline: float, pidfd: int):
+    _check_qmp_pidfd(pidfd)
+    _validate_runtime_directory(qmp_runtime, service_uid=service_uid)
+    if qmp_socket_path != qmp_runtime / "qmp.sock":
+        raise Refused("QMP socket is outside its fixed private runtime directory")
     try:
-        service_uid = os.geteuid()
-        sock_info = os.lstat(QMP_SOCKET_PATH)
+        sock_info = os.lstat(qmp_socket_path)
     except OSError as error:
         raise Refused("private QMP socket is unavailable") from error
     if not stat.S_ISSOCK(sock_info.st_mode) or sock_info.st_uid != service_uid:
         raise Refused("QMP socket has unsafe type or owner")
-    if not hasattr(os, "pidfd_open"):
-        raise Refused("pidfd support is required to verify bounded QEMU exit")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(min(2.0, max(0.1, deadline - time.monotonic())))
+        client.connect(str(qmp_socket_path))
+        peer = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if peer[0] != pid or peer[1] != service_uid:
+            raise Refused("QMP peer differs from the exact QEMU PID and service identity")
+        _check_qmp_pidfd(pidfd)
+        buffer = bytearray()
+        if not isinstance(_recv_qmp_line(client, deadline, buffer).get("QMP"), dict):
+            raise Refused("QMP peer did not send its protocol greeting")
+        client.settimeout(max(0.1, deadline - time.monotonic()))
+        client.sendall((json.dumps({"execute": "qmp_capabilities"}, separators=(",", ":"))
+                        + "\r\n").encode())
+        while True:
+            response = _recv_qmp_line(client, deadline, buffer)
+            if "event" in response:
+                continue
+            if "error" in response or not isinstance(response.get("return"), dict):
+                raise Refused("QMP rejected its fixed capability negotiation")
+            break
+        return client, pidfd, buffer
+    except (OSError, TimeoutError):
+        client.close()
+        raise Refused("identity-bound QMP connection could not be completed")
+    except BaseException:
+        client.close()
+        raise
+
+
+def _check_qmp_pidfd(pidfd: int) -> None:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    if poller.poll(0):
+        raise Refused("QEMU MainPID exited during identity-bound QMP operation")
+
+
+def qmp_powerdown_and_wait(pid: int, *, timeout_seconds: float = QMP_STOP_TIMEOUT,
+                           qmp_runtime: pathlib.Path | None = None,
+                           qmp_socket_path: pathlib.Path | None = None,
+                           service_uid: int | None = None) -> None:
+    """Send identity-bound QMP powerdown and wait for actual QEMU process exit."""
+    if type(pid) is not int or pid <= 1 or not 0 < timeout_seconds <= 20:
+        raise Refused("invalid fixed QMP stop request")
+    qmp_runtime = QMP_RUNTIME if qmp_runtime is None else pathlib.Path(qmp_runtime)
+    qmp_socket_path = QMP_SOCKET_PATH if qmp_socket_path is None else pathlib.Path(qmp_socket_path)
+    service_uid = os.geteuid() if service_uid is None else service_uid
     try:
         pidfd = os.pidfd_open(pid, 0)
     except OSError as error:
@@ -302,30 +361,25 @@ def qmp_powerdown_and_wait(pid: int, *, timeout_seconds: float = QMP_STOP_TIMEOU
         if error.errno == errno.ESRCH:
             return
         raise Refused("could not bind shutdown to the systemd MainPID") from error
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     deadline = time.monotonic() + timeout_seconds
+    client = None
     try:
-        client.settimeout(min(2.0, timeout_seconds))
-        client.connect(str(QMP_SOCKET_PATH))
-        peer = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-        if peer[0] != pid or peer[1] != service_uid:
-            raise Refused("QMP peer differs from systemd's exact QEMU MainPID identity")
-        buffer = bytearray()
-        if not isinstance(_recv_qmp_line(client, deadline, buffer).get("QMP"), dict):
-            raise Refused("QMP peer did not send its protocol greeting")
-        for command in ("qmp_capabilities", "system_powerdown"):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise Refused("QMP exchange exceeded its bounded deadline")
-            client.settimeout(remaining)
-            client.sendall((json.dumps({"execute": command}, separators=(",", ":")) + "\r\n").encode())
-            while True:
-                response = _recv_qmp_line(client, deadline, buffer)
-                if "event" in response:
-                    continue
-                if "error" in response or not isinstance(response.get("return"), dict):
-                    raise Refused(f"QMP rejected fixed command {command}")
-                break
+        client, pidfd, buffer = _open_qmp_peer(
+            pid, qmp_runtime=qmp_runtime, qmp_socket_path=qmp_socket_path,
+            service_uid=service_uid, deadline=deadline, pidfd=pidfd)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refused("QMP exchange exceeded its bounded deadline")
+        client.settimeout(remaining)
+        client.sendall((json.dumps({"execute": "system_powerdown"}, separators=(",", ":"))
+                        + "\r\n").encode())
+        while True:
+            response = _recv_qmp_line(client, deadline, buffer)
+            if "event" in response:
+                continue
+            if "error" in response or not isinstance(response.get("return"), dict):
+                raise Refused("QMP rejected fixed graceful-shutdown command")
+            break
         poller = select.poll()
         poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
         remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
@@ -333,6 +387,52 @@ def qmp_powerdown_and_wait(pid: int, *, timeout_seconds: float = QMP_STOP_TIMEOU
             raise Refused("QEMU did not exit after bounded QMP system_powerdown; systemd KILL fallback required")
     except (OSError, TimeoutError) as error:
         raise Refused("could not complete identity-bound bounded QMP shutdown") from error
+    finally:
+        if client is not None:
+            client.close()
+        os.close(pidfd)
+
+
+def qmp_query_status(pid: int, *, qmp_runtime: pathlib.Path | None = None,
+                     qmp_socket_path: pathlib.Path | None = None,
+                     service_uid: int | None = None,
+                     timeout_seconds: float = 2.0) -> dict[str, bool | str]:
+    """Return only allowlisted QMP status fields from the identity-pinned peer."""
+    if type(pid) is not int or pid <= 1 or not 0 < timeout_seconds <= 5:
+        raise Refused("invalid bounded QMP observation request")
+    qmp_runtime = QMP_RUNTIME if qmp_runtime is None else pathlib.Path(qmp_runtime)
+    qmp_socket_path = QMP_SOCKET_PATH if qmp_socket_path is None else pathlib.Path(qmp_socket_path)
+    service_uid = os.geteuid() if service_uid is None else service_uid
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except OSError as error:
+        raise Refused("could not bind QMP observation to the exact QEMU PID") from error
+    try:
+        client, pidfd, buffer = _open_qmp_peer(
+            pid, qmp_runtime=qmp_runtime, qmp_socket_path=qmp_socket_path,
+            service_uid=service_uid, deadline=deadline, pidfd=pidfd)
+    except BaseException:
+        os.close(pidfd)
+        raise
+    try:
+        client.settimeout(max(0.1, deadline - time.monotonic()))
+        client.sendall((json.dumps({"execute": "query-status"}, separators=(",", ":"))
+                        + "\r\n").encode())
+        while True:
+            response = _recv_qmp_line(client, deadline, buffer)
+            if "event" in response:
+                continue
+            result = response.get("return")
+            if "error" in response or not isinstance(result, dict):
+                raise Refused("QMP status observation was rejected")
+            status = result.get("status")
+            running = result.get("running")
+            single_step = result.get("singlestep")
+            if (not isinstance(status, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", status)
+                    or type(running) is not bool or type(single_step) is not bool):
+                raise Refused("QMP status observation has an invalid fixed schema")
+            return {"status": status, "running": running, "singlestep": single_step}
     finally:
         client.close()
         os.close(pidfd)
@@ -349,95 +449,213 @@ def _proxy_ready() -> None:
     raise Refused("restricted proxy did not publish the fixed accepting listener")
 
 
-def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20,
-               capture_limit: int | None = None):
-    _require_fixed_file(CONTROL_KEY, uid=0, mode=0o640, group=CONTROL_GROUP)
-    _require_fixed_file(KNOWN_HOSTS, uid=0, mode=0o644)
-    service_uid = pwd.getpwnam(SERVICE_USER).pw_uid
-    uid = os.getuid()
-    if uid == service_uid:
-        runtime = QMP_RUNTIME
+def guest_ssh_argv(*, ssh_port: int, identity_file: pathlib.Path,
+                   known_hosts: pathlib.Path, tty: bool = False) -> list[str]:
+    """Build the one strict host-key-pinned SSH command used by every VM instance."""
+    if type(ssh_port) is not int or not 1024 <= ssh_port <= 65535:
+        raise Refused("guest SSH port is outside its fixed unprivileged range")
+    for label, path in (("identity", identity_file), ("known-hosts", known_hosts)):
+        text = os.fspath(path)
+        if not isinstance(text, str) or not text.startswith("/") or any(
+                character in text for character in ("\0", "\n", "\r")):
+            raise Refused(f"guest SSH {label} path is not a fixed absolute path")
+    return ["/usr/bin/ssh", "-F", "/dev/null", *( ["-tt"] if tty else []),
+            "-p", str(ssh_port), "-i", str(identity_file),
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
+            "-o", "ProxyJump=none", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes",
+            "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
+            "-o", "CheckHostIP=no", "-o", "UpdateHostKeys=no", "mester@127.0.0.1"]
+
+
+def _read_guest_ssh_asset(path: pathlib.Path, *, expected_uid: int | None,
+                          mode: int, limit: int, group: str | None = None) -> bytes:
+    if expected_uid is None:
+        _require_fixed_file(path, uid=0, mode=mode, group=group)
     else:
-        runtime = pathlib.Path(f"/run/user/{uid}")
+        try:
+            before = os.lstat(path)
+        except OSError as error:
+            raise Refused("profile guest SSH identity is unavailable") from error
+        if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                or before.st_uid != expected_uid or stat.S_IMODE(before.st_mode) != mode
+                or before.st_nlink != 1 or before.st_size > limit):
+            raise Refused("profile guest SSH identity has unsafe owner, mode, or size")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != mode
+                or (expected_uid is not None and info.st_uid != expected_uid)
+                or info.st_size > limit):
+            raise Refused("guest SSH credential changed while opening")
+        data = bytearray()
+        while len(data) <= limit:
+            chunk = os.read(fd, min(4096, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > limit:
+            raise Refused("guest SSH credential exceeds its fixed size bound")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _write_guest_ssh_stage(path: pathlib.Path, payload: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise Refused("temporary guest SSH credential write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _run_guest_ssh(argv: list[str], *, tty: bool, timeout: float,
+                   capture_limit: int | None, capture_stderr_limit: int):
+    if capture_limit is not None and (
+            type(capture_limit) is not int or not 0 < capture_limit <= GUEST_COMPAT_MAX_OUTPUT):
+        raise Refused("bounded guest inspection output limit is invalid")
+    if type(capture_stderr_limit) is not int or not 0 <= capture_stderr_limit <= 8192:
+        raise Refused("bounded guest SSH diagnostic output limit is invalid")
+    if tty and (capture_limit is not None or capture_stderr_limit):
+        raise Refused("interactive guest SSH cannot capture output")
+    if capture_limit is None and capture_stderr_limit == 0:
+        result = subprocess.run(argv, stdin=None if tty else subprocess.DEVNULL,
+                                timeout=timeout, check=False)
+        return result.returncode
+
+    process = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture_limit is not None else subprocess.DEVNULL,
+        stderr=subprocess.PIPE if capture_stderr_limit else subprocess.DEVNULL,
+        close_fds=True)
+    streams = {}
+    outputs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    if process.stdout is not None:
+        streams[process.stdout.fileno()] = ("stdout", capture_limit)
+    if process.stderr is not None:
+        streams[process.stderr.fileno()] = ("stderr", capture_stderr_limit)
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            selector.register(stream, selectors.EVENT_READ)
+            os.set_blocking(stream.fileno(), False)
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            events = selector.select(min(remaining, 0.1))
+            if not events and process.poll() is not None:
+                # Drain to EOF; a child can exit with buffered pipe data.
+                continue
+            for key, _ in events:
+                label, limit = streams[key.fd]
+                try:
+                    chunk = os.read(key.fd, 4096)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                target = outputs[label]
+                remaining_capacity = (None if limit is None else max(0, limit - len(target)))
+                if remaining_capacity is not None:
+                    target.extend(chunk[:remaining_capacity])
+                if (label == "stdout" and remaining_capacity is not None
+                        and len(chunk) > remaining_capacity):
+                    process.kill()
+                    process.wait()
+                    raise Refused("fixed guest compatibility response exceeded its bound")
+        if timed_out:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise GuestSSHTimeout("bounded guest SSH request timed out",
+                                  stderr=bytes(outputs["stderr"]))
+        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as error:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise GuestSSHTimeout("bounded guest SSH request timed out",
+                              stderr=bytes(outputs["stderr"])) from error
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+    if capture_limit is not None and capture_stderr_limit:
+        return return_code, bytes(outputs["stdout"]), bytes(outputs["stderr"])
+    if capture_limit is not None:
+        return return_code, bytes(outputs["stdout"])
+    return return_code, bytes(outputs["stderr"])
+
+
+def _guest_ssh(command: str, *, tty: bool = False, timeout: float = 20,
+               capture_limit: int | None = None, capture_stderr_limit: int = 0,
+               ssh_port: int = SSH_PORT, identity_file: pathlib.Path = CONTROL_KEY,
+               known_hosts: pathlib.Path = KNOWN_HOSTS,
+               expected_identity_uid: int | None = None,
+               runtime_directory: pathlib.Path | None = None,
+               expected_runtime_uid: int | None = None):
+    identity_mode = 0o640 if expected_identity_uid is None else 0o600
+    identity_group = CONTROL_GROUP if expected_identity_uid is None else None
+    known_hosts_mode = 0o644 if expected_identity_uid is None else 0o600
+    identity = _read_guest_ssh_asset(identity_file, expected_uid=expected_identity_uid,
+                                     mode=identity_mode, limit=16 * 1024,
+                                     group=identity_group)
+    known = _read_guest_ssh_asset(known_hosts, expected_uid=expected_identity_uid,
+                                  mode=known_hosts_mode, limit=4096)
+    current_uid = os.getuid()
+    service_uid = pwd.getpwnam(SERVICE_USER).pw_uid
+    runtime = (runtime_directory if runtime_directory is not None else
+               QMP_RUNTIME if current_uid == service_uid else pathlib.Path(f"/run/user/{current_uid}"))
+    runtime_owner = (expected_runtime_uid if expected_runtime_uid is not None else current_uid)
     try:
         runtime_info = os.lstat(runtime)
     except OSError as error:
         raise Refused("private SSH identity runtime is unavailable") from error
     if (not stat.S_ISDIR(runtime_info.st_mode) or stat.S_ISLNK(runtime_info.st_mode)
-            or runtime_info.st_uid != uid or stat.S_IMODE(runtime_info.st_mode) != 0o700):
+            or runtime_info.st_uid != runtime_owner or stat.S_IMODE(runtime_info.st_mode) != 0o700):
         raise Refused("private SSH identity runtime has unsafe owner or mode")
     key_dir = runtime / f"lm-system-ssh-{secrets.token_hex(12)}"
     key_dir.mkdir(mode=0o700)
-    key_path = key_dir / "identity"
-    key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    identity_path = key_dir / "identity"
+    known_path = key_dir / "known_hosts"
     try:
-        payload = CONTROL_KEY.read_bytes()
-        view = memoryview(payload)
-        while view:
-            written = os.write(key_fd, view)
-            if written <= 0:
-                raise Refused("private SSH identity staging made no progress")
-            view = view[written:]
-        os.fsync(key_fd)
+        _write_guest_ssh_stage(identity_path, identity)
+        _write_guest_ssh_stage(known_path, known)
+        ssh = guest_ssh_argv(ssh_port=ssh_port, identity_file=identity_path,
+                             known_hosts=known_path, tty=tty) + [command]
+        return _run_guest_ssh(ssh, tty=tty, timeout=timeout, capture_limit=capture_limit,
+                              capture_stderr_limit=capture_stderr_limit)
     finally:
-        os.close(key_fd)
-    ssh = ["/usr/bin/ssh", "-F", "/dev/null", "-p", str(SSH_PORT),
-           "-i", str(key_path), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-           "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=yes",
-           "-o", f"UserKnownHostsFile={KNOWN_HOSTS}", "-o", "GlobalKnownHostsFile=/dev/null",
-           "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "ConnectTimeout=5",
-           "-o", "ClearAllForwardings=yes", "-o", "RequestTTY=force" if tty else "RequestTTY=no",
-           "mester@127.0.0.1", command]
-    try:
-        if capture_limit is None:
-            result = subprocess.run(ssh, stdin=None if tty else subprocess.DEVNULL,
-                                     timeout=timeout, check=False)
-            return result.returncode
-        if tty or type(capture_limit) is not int or not 0 < capture_limit <= GUEST_COMPAT_MAX_OUTPUT:
-            raise Refused("bounded guest inspection parameters are invalid")
-        process = subprocess.Popen(ssh, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, close_fds=True)
-        assert process.stdout is not None
-        output = bytearray()
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + timeout
-        try:
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    process.kill()
-                    process.wait()
-                    raise GuestSSHTimeout("bounded captured guest SSH request timed out")
-                events = selector.select(remaining)
-                if not events and process.poll() is not None:
-                    break
-                for key, _ in events:
-                    chunk = os.read(key.fd, min(4096, capture_limit + 1 - len(output)))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    output.extend(chunk)
-                    if len(output) > capture_limit:
-                        process.kill()
-                        process.wait()
-                        raise Refused("fixed guest compatibility response exceeded its bound")
-            return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
-        except BaseException:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-            raise
-        finally:
-            selector.close()
-            process.stdout.close()
-        return return_code, bytes(output)
-    finally:
-        info = os.lstat(key_path)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
-            raise Refused("temporary SSH identity changed; preserving the evidence")
-        os.unlink(key_path)
+        for path in (identity_path, known_path):
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != current_uid
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise Refused("temporary SSH credential changed; preserving the evidence")
+            os.unlink(path)
         os.rmdir(key_dir)
 
 
@@ -570,57 +788,183 @@ def _cloud_init_status_state(return_code: int, stdout: bytes) -> str:
     return "INCONCLUSIVE"
 
 
-def _wait_for_guest_provisioning() -> int:
-    """Wait for a clean cloud-init final state and its existing provision marker."""
+def _ssh_failure_label(stderr: bytes, returncode: int, *, timed_out: bool = False) -> str:
+    """Reduce bounded, untrusted OpenSSH output to a fixed diagnostic vocabulary."""
+    text = stderr.decode("utf-8", "ignore").lower()
+    if "host key verification failed" in text or "remote host identification has changed" in text:
+        return "SSH_HOST_KEY_REJECTED"
+    if "permission denied" in text and "publickey" in text:
+        return "SSH_AUTH_REJECTED"
+    if timed_out:
+        return "SSH_CLIENT_ATTEMPT_TIMED_OUT"
+    if "connection refused" in text:
+        return "GUEST_SSH_SERVICE_UNAVAILABLE"
+    if "connection timed out" in text or "operation timed out" in text:
+        return "GUEST_SSH_SERVICE_UNRESPONSIVE"
+    if returncode == 255:
+        return "SSH_TRANSPORT_OR_HANDSHAKE_FAILED"
+    return "GUEST_READINESS_COMMAND_FAILED"
+
+
+def _open_qemu_readiness_pidfd(pid: int | None, expected_uid: int | None) -> int | None:
+    if pid is None:
+        return None
+    if (type(pid) is not int or pid <= 1
+            or (expected_uid is not None
+                and (type(expected_uid) is not int or expected_uid <= 0))):
+        raise Refused("QEMU readiness process identity is invalid")
+    if not hasattr(os, "pidfd_open"):
+        raise Refused("pidfd support is required to monitor QEMU readiness")
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except OSError as error:
+        raise Refused("QEMU_PROCESS_EXITED_BEFORE_READINESS") from error
+    try:
+        if expected_uid is None:
+            _check_qemu_readiness_pidfd(pidfd)
+            return pidfd
+        executable = os.readlink(f"/proc/{pid}/exe")
+        status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except OSError as error:
+        os.close(pidfd)
+        raise Refused("QEMU_PROCESS_EXITED_BEFORE_READINESS") from error
+    except BaseException:
+        os.close(pidfd)
+        raise
+    try:
+        uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
+        values = uid_line.split()
+        if (len(values) != 5 or values[1] != str(expected_uid)
+                or os.path.realpath(executable) != "/usr/bin/qemu-system-x86_64"):
+            raise Refused("QEMU_IDENTITY_MISMATCH_BEFORE_READINESS")
+        _check_qemu_readiness_pidfd(pidfd)
+        return pidfd
+    except BaseException:
+        os.close(pidfd)
+        raise
+
+
+def _check_qemu_readiness_pidfd(pidfd: int | None) -> None:
+    if pidfd is None:
+        return
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    if poller.poll(0):
+        raise Refused("QEMU_PROCESS_EXITED_BEFORE_READINESS")
+
+
+def _readiness_progress(started: float, phase: str, attempts: int, last: str,
+                        last_report: list[float]) -> None:
+    now = time.monotonic()
+    if now - last_report[0] < 30.0:
+        return
+    elapsed = max(0, int(now - started))
+    print(f"guest_readiness_progress elapsed_seconds={elapsed} phase={phase} "
+          f"attempts={attempts} last={last}", flush=True)
+    last_report[0] = now
+
+
+def _guest_ssh_with_options(command: str, guest_ssh_options: dict | None = None, **kwargs):
+    options = {} if guest_ssh_options is None else dict(guest_ssh_options)
+    options.update(kwargs)
+    return _guest_ssh(command, **options)
+
+
+def _wait_for_guest_provisioning(*, deadline: float | None = None,
+                                 guest_ssh_options: dict | None = None,
+                                 qemu_check=None, progress=None) -> int:
+    """Wait for clean cloud-init completion under the caller's one startup deadline."""
     started = time.monotonic()
-    deadline = started + SSH_READY_TIMEOUT
+    deadline = started + SSH_READY_TIMEOUT if deadline is None else deadline
+    attempts = 0
+    last_failure = "SSH_FORWARD_NOT_LISTENING"
     while True:
+        if qemu_check is not None:
+            qemu_check()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         try:
-            result = _guest_ssh(
-                CLOUD_INIT_STATUS_COMMAND, timeout=min(15.0, remaining),
-                capture_limit=GUEST_COMPAT_MAX_OUTPUT)
-        except (OSError, subprocess.SubprocessError, GuestSSHTimeout):
+            result = _guest_ssh_with_options(
+                CLOUD_INIT_STATUS_COMMAND, guest_ssh_options,
+                timeout=min(15.0, remaining), capture_limit=GUEST_COMPAT_MAX_OUTPUT,
+                capture_stderr_limit=8192)
+            attempts += 1
+        except GuestSSHTimeout as error:
+            attempts += 1
+            last_failure = _ssh_failure_label(error.stderr, -signal.SIGKILL, timed_out=True)
+            if progress is not None:
+                progress("cloud-init", attempts, last_failure)
+            time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+            continue
+        except (OSError, subprocess.SubprocessError) as error:
+            attempts += 1
+            last_failure = "SSH_TRANSPORT_OR_HANDSHAKE_FAILED"
+            if progress is not None:
+                progress("cloud-init", attempts, last_failure)
             result = None
         if result is not None:
-            if not isinstance(result, tuple) or len(result) != 2:
+            if not isinstance(result, tuple) or len(result) not in (2, 3):
                 raise Refused("cloud-init status response is inconclusive")
-            return_code, stdout = result
+            return_code, stdout = result[:2]
+            stderr = result[2] if len(result) == 3 else b""
             if type(return_code) is int and return_code == 255:
-                state = "TRANSPORT"  # SSH is not ready yet; keep polling within the shared bound.
+                last_failure = _ssh_failure_label(stderr, return_code)
+                if last_failure in ("SSH_HOST_KEY_REJECTED", "SSH_AUTH_REJECTED"):
+                    raise Refused(last_failure)
+                state = "TRANSPORT"
             else:
                 state = _cloud_init_status_state(return_code, stdout)
             if state == "ERROR":
                 raise Refused("cloud-init reported unsuccessful or degraded completion")
             if state == "INCONCLUSIVE":
                 raise Refused("cloud-init status is inconclusive; provisioning is not established")
+            if state == "RUNNING":
+                last_failure = "CLOUD_INIT_RUNNING"
             if state == "DONE":
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
-                    marker_status = _guest_ssh(
-                        GUEST_PROVISIONED_COMMAND, timeout=min(15.0, remaining))
+                    marker_result = _guest_ssh_with_options(
+                        GUEST_PROVISIONED_COMMAND, guest_ssh_options,
+                        timeout=min(15.0, remaining), capture_stderr_limit=8192)
+                    if type(marker_result) is int:
+                        marker_status, marker_stderr = marker_result, b""
+                    else:
+                        marker_status, marker_stderr = marker_result
+                except GuestSSHTimeout as error:
+                    marker_status, marker_stderr = 255, error.stderr
                 except (OSError, subprocess.SubprocessError):
-                    marker_status = 255
+                    marker_status, marker_stderr = 255, b""
                 if marker_status == 0:
                     elapsed = time.monotonic() - started
-                    if elapsed <= SSH_READY_TIMEOUT:
+                    if time.monotonic() < deadline:
                         return max(0, int(elapsed * 1000))
                     break
                 if marker_status != 255:
                     raise Refused("guest provisioning completion marker is missing or unsafe")
+                last_failure = _ssh_failure_label(marker_stderr, marker_status)
+                if last_failure in ("SSH_HOST_KEY_REJECTED", "SSH_AUTH_REJECTED"):
+                    raise Refused(last_failure)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
+        if progress is not None:
+            progress("cloud-init", attempts, last_failure)
         time.sleep(min(2.0, remaining))
-    raise Refused("cloud-init or SSH did not complete before its bound")
+    raise Refused(f"GUEST_READINESS_DEADLINE_EXPIRED phase=cloud-init last={last_failure} "
+                  f"attempts={attempts}")
 
 
-def _ensure_guest_ready() -> None:
+def _ensure_guest_ready(*, qemu_pid: int | None = None,
+                        qemu_pidfd: int | None = None,
+                        expected_qemu_uid: int | None = None,
+                        guest_ssh_options: dict | None = None,
+                        workspace_path: str | None = None,
+                        verify_workspace_mount: bool = False,
+                        timeout_seconds: float | None = None) -> None:
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "system_parent_session_contract", pathlib.Path(__file__).with_name("parent-session-contract.py"))
@@ -628,19 +972,93 @@ def _ensure_guest_ready() -> None:
         raise Refused("protected parent session contract is unavailable")
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
-    cloud_init_ready_wait_ms = _wait_for_guest_provisioning()
-
-    _check_guest_compatibility(cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
-    command = contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE)
-    deadline = time.monotonic() + SSH_READY_TIMEOUT
-    while time.monotonic() < deadline:
+    workspace_path = contract.SYSTEM_WORKSPACE if workspace_path is None else workspace_path
+    timeout_seconds = SSH_READY_TIMEOUT if timeout_seconds is None else timeout_seconds
+    if (type(timeout_seconds) not in (int, float)
+            or not 0 < timeout_seconds <= SSH_READY_TIMEOUT):
+        raise Refused("guest readiness deadline is outside its existing fixed bound")
+    if qemu_pidfd is not None:
+        if qemu_pid is not None or type(qemu_pidfd) is not int or qemu_pidfd < 0:
+            raise Refused("guest readiness pidfd input is invalid")
         try:
-            if _guest_ssh(command, timeout=15) == 0:
-                return
-        except (OSError, subprocess.SubprocessError):
-            pass
-        time.sleep(2)
-    raise Refused("protected session readiness did not complete before its bound")
+            if os.readlink(f"/proc/self/fd/{qemu_pidfd}") != "anon_inode:[pidfd]":
+                raise Refused("guest readiness descriptor is not a pidfd")
+        except OSError as error:
+            raise Refused("guest readiness pidfd is unavailable") from error
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    last_report = [started]
+    attempts = 0
+    last_failure = "SSH_FORWARD_NOT_LISTENING"
+    external_pidfd = qemu_pidfd is not None
+    pidfd = (qemu_pidfd if external_pidfd
+             else _open_qemu_readiness_pidfd(qemu_pid, expected_qemu_uid))
+
+    def check_qemu() -> None:
+        _check_qemu_readiness_pidfd(pidfd)
+
+    def progress(phase: str, count: int, last: str) -> None:
+        _readiness_progress(started, phase, count, last, last_report)
+
+    try:
+        with StageTimer().timed_stage("guest_readiness_ssh"):
+            cloud_init_ready_wait_ms = _wait_for_guest_provisioning(
+                deadline=deadline, guest_ssh_options=guest_ssh_options,
+                qemu_check=check_qemu, progress=progress)
+            check_qemu()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Refused("GUEST_READINESS_DEADLINE_EXPIRED phase=compatibility "
+                              "last=SSH_CLIENT_ATTEMPT_TIMED_OUT attempts=0")
+            _check_guest_compatibility(cloud_init_ready_wait_ms=cloud_init_ready_wait_ms,
+                                       workspace_path=workspace_path,
+                                       guest_ssh_options=guest_ssh_options,
+                                       timeout=min(20.0, remaining))
+            command = contract.readiness_checks(workspace_path=workspace_path)
+            while time.monotonic() < deadline:
+                check_qemu()
+                remaining = deadline - time.monotonic()
+                try:
+                    result = _guest_ssh_with_options(
+                        command, guest_ssh_options, timeout=min(15.0, remaining),
+                        capture_stderr_limit=8192)
+                    if type(result) is int:
+                        return_code, stderr = result, b""
+                    else:
+                        return_code, stderr = result
+                except GuestSSHTimeout as error:
+                    attempts += 1
+                    last_failure = _ssh_failure_label(error.stderr, -signal.SIGKILL, timed_out=True)
+                    progress("session-contract", attempts, last_failure)
+                    time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+                    continue
+                except (OSError, subprocess.SubprocessError):
+                    attempts += 1
+                    last_failure = "SSH_TRANSPORT_OR_HANDSHAKE_FAILED"
+                    progress("session-contract", attempts, last_failure)
+                    time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+                    continue
+                attempts += 1
+                if return_code == 0:
+                    check_qemu()
+                    if verify_workspace_mount and workspace_path == contract.SYSTEM_WORKSPACE:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        _guest_workspace_mount(
+                            guest_ssh_options=guest_ssh_options,
+                            timeout=min(20.0, remaining))
+                    return
+                last_failure = _ssh_failure_label(stderr, return_code)
+                if last_failure in ("SSH_HOST_KEY_REJECTED", "SSH_AUTH_REJECTED"):
+                    raise Refused(last_failure)
+                progress("session-contract", attempts, last_failure)
+                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+            raise Refused(f"GUEST_READINESS_DEADLINE_EXPIRED phase=session-contract "
+                          f"last={last_failure} attempts={attempts}")
+    finally:
+        if pidfd is not None and not external_pidfd:
+            os.close(pidfd)
 
 
 def _guest_compatibility_module():
@@ -653,18 +1071,25 @@ def _guest_compatibility_module():
     return module
 
 
-def _check_guest_compatibility(*, cloud_init_ready_wait_ms: int | None = None) -> None:
+def _check_guest_compatibility(*, cloud_init_ready_wait_ms: int | None = None,
+                               workspace_path: str | None = None,
+                               guest_ssh_options: dict | None = None,
+                               timeout: float = 20) -> None:
     checker = _guest_compatibility_module()
-    command = checker.build_inspection_command(checker.SYSTEM_WORKSPACE)
+    workspace_path = checker.SYSTEM_WORKSPACE if workspace_path is None else workspace_path
+    command = checker.build_inspection_command(workspace_path)
     try:
-        result = _guest_ssh(command, timeout=20, capture_limit=GUEST_COMPAT_MAX_OUTPUT)
+        result = _guest_ssh_with_options(
+            command, guest_ssh_options, timeout=timeout,
+            capture_limit=GUEST_COMPAT_MAX_OUTPUT)
     except (OSError, subprocess.SubprocessError, Refused):
         print("Guest compatibility: INCONCLUSIVE (fixed inspection failed)", file=sys.stderr)
         raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
     if not isinstance(result, tuple) or len(result) != 2 or result[0] != 0:
         print("Guest compatibility: INCONCLUSIVE (fixed inspection unavailable)", file=sys.stderr)
         raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
-    expected = checker.expected_inventory()
+    expected = (checker.expected_inventory() if workspace_path == checker.SYSTEM_WORKSPACE
+                else checker.expected_inventory(workspace_path))
     status, diagnostics = checker.classify_inventory(result[1], expected)
     print(f"Guest compatibility: {status}" +
           (" (" + ", ".join(diagnostics[:16]) + ")" if diagnostics else ""),
@@ -672,7 +1097,8 @@ def _check_guest_compatibility(*, cloud_init_ready_wait_ms: int | None = None) -
     if status != "MATCH":
         try:
             evidence = checker.format_failure_evidence(
-                result[1], expected, cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
+                result[1], expected, cloud_init_ready_wait_ms=cloud_init_ready_wait_ms,
+                workspace_path=workspace_path)
             if (not isinstance(evidence, str)
                     or not evidence.startswith("Guest compatibility evidence:")
                     or len(evidence.encode("utf-8")) > 1024):
@@ -694,13 +1120,14 @@ def _workspace_policy():
     return module
 
 
-def _guest_workspace_mount() -> None:
+def _guest_workspace_mount(*, guest_ssh_options: dict | None = None,
+                           timeout: float = 20) -> None:
     command = (
         "set -eu; test ! -L /workspace; mountpoint -q /workspace; "
         "test \"$(findmnt -n -o FSTYPE --target /workspace)\" = virtiofs; "
         "test \"$(findmnt -n -o SOURCE --target /workspace)\" = workspace; "
         "test -w /workspace")
-    if _guest_ssh(command, timeout=20) != 0:
+    if _guest_ssh_with_options(command, guest_ssh_options, timeout=timeout) != 0:
         raise Refused("guest did not mount the approved host directory at /workspace")
 
 
@@ -762,10 +1189,11 @@ def _probe_workspace() -> None:
             _remove_probe(guest_path, (guest_info.st_dev, guest_info.st_ino), workspace.uid, payload)
 
 
-def _qemu_guest_ready() -> None:
+def _qemu_guest_ready(qemu_pid: int | None = None) -> None:
     _proxy_ready()
-    _ensure_guest_ready()
-    _guest_workspace_mount()
+    vm_uid = pwd.getpwnam(SERVICE_USER).pw_uid
+    _ensure_guest_ready(qemu_pid=qemu_pid, expected_qemu_uid=vm_uid,
+                        workspace_path="/workspace", verify_workspace_mount=True)
 
 
 def _system_unit_active() -> bool:

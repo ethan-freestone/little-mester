@@ -38,6 +38,7 @@ FILES = {
         ("/etc/systemd/system/little-mester-vm-metrics.service", 0o644),
     "sudoers/little-mester-vm": ("/etc/sudoers.d/little-mester-vm", 0o440),
     "lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py", 0o644),
+    "lib/vm/vm-stage-reporting.py": ("/usr/lib/little-mester-vm/vm-stage-reporting.py", 0o644),
     "lib/vm/vm-instance.py": ("/usr/lib/little-mester-vm/vm-instance.py", 0o644),
     "lib/vm/profile-control-core.py":
         ("/usr/lib/little-mester-vm/profile-control-core.py", 0o644),
@@ -109,6 +110,7 @@ UPDATE_ADDITIONALS = frozenset({
     "systemd/little-mester-vm-metrics.service",
     "lib/vm/system-vm-workspace.py",
     "lib/vm/system-vm-metrics.py",
+    "lib/vm/vm-stage-reporting.py",
     "lib/vm/vm-instance.py",
     "lib/vm/profile-control-core.py",
     "lib/vm/executable-policy.py",
@@ -139,6 +141,7 @@ PERMANENT_INTERLOCK_RELATIVES = frozenset({
     "lib/vm/executable-policy.py",
     "lib/vm/system-vm-workspace.py",
     "lib/vm/system-vm-metrics.py",
+    "lib/vm/vm-stage-reporting.py",
     "lib/vm/parent-metrics.py",
     "lib/vm/parent-metrics-collect.py",
     "lib/vm/parent-qemu.py",

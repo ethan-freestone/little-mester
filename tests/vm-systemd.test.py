@@ -536,7 +536,8 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertEqual(guest_ssh.call_count, 4)
         self.assertEqual(calls, ["cloud-init-running", "cloud-init-done", "provision-marker",
                                  "compat", "readiness"])
-        self.assertEqual(set(compatibility_context[0]), {"cloud_init_ready_wait_ms"})
+        self.assertEqual(set(compatibility_context[0]), {
+            "cloud_init_ready_wait_ms", "workspace_path", "guest_ssh_options", "timeout"})
         self.assertIsInstance(compatibility_context[0]["cloud_init_ready_wait_ms"], int)
         self.assertGreaterEqual(compatibility_context[0]["cloud_init_ready_wait_ms"], 0)
         status_calls = [call for call in guest_ssh.call_args_list
@@ -586,7 +587,7 @@ class SystemdPolicyTests(unittest.TestCase):
              mock.patch.object(vm.time, "sleep", side_effect=clock.sleep), \
              mock.patch.object(vm, "_guest_ssh", return_value=cloud_init_result("running")) as ssh, \
              mock.patch.object(vm, "_check_guest_compatibility") as compatibility_check:
-            with self.assertRaisesRegex(vm.Refused, "did not complete before its bound"):
+            with self.assertRaisesRegex(vm.Refused, "GUEST_READINESS_DEADLINE_EXPIRED"):
                 vm._ensure_guest_ready()
         self.assertEqual(ssh.call_count, 2)
         compatibility_check.assert_not_called()
@@ -608,7 +609,7 @@ class SystemdPolicyTests(unittest.TestCase):
                 vm._ensure_guest_ready()
         ssh.assert_called_once_with(
             vm.CLOUD_INIT_STATUS_COMMAND, timeout=15.0,
-            capture_limit=vm.GUEST_COMPAT_MAX_OUTPUT)
+            capture_limit=vm.GUEST_COMPAT_MAX_OUTPUT, capture_stderr_limit=8192)
         compatibility_check.assert_not_called()
 
     def test_cloud_init_error_and_missing_provision_marker_block_compatibility(self):
@@ -1930,6 +1931,7 @@ class SystemdPolicyTests(unittest.TestCase):
                 time.sleep(0.01)
             try:
                 with mock.patch.object(vm, "QMP_SOCKET_PATH", path), \
+                     mock.patch.object(vm, "QMP_RUNTIME", path.parent), \
                      mock.patch.object(vm, "_validate_runtime_directory"):
                     vm.qmp_powerdown_and_wait(process.pid, timeout_seconds=3)
                 self.assertEqual(process.wait(timeout=2), 0)
@@ -1967,6 +1969,7 @@ class SystemdPolicyTests(unittest.TestCase):
                 time.sleep(0.01)
             try:
                 with mock.patch.object(vm, "QMP_SOCKET_PATH", path), \
+                     mock.patch.object(vm, "QMP_RUNTIME", path.parent), \
                      mock.patch.object(vm, "_validate_runtime_directory"):
                     with self.assertRaisesRegex(vm.Refused, "systemd KILL fallback required"):
                         vm.qmp_powerdown_and_wait(process.pid, timeout_seconds=0.2)
@@ -2063,7 +2066,7 @@ class StageTimerTests(unittest.TestCase):
     def test_default_clock_requests_utc_and_naive_injected_clock_is_rejected(self):
         output = io.StringIO()
         timestamp = datetime.datetime(2026, 11, 21, tzinfo=datetime.timezone.utc)
-        with mock.patch.object(acceptance.datetime, "datetime") as clock:
+        with mock.patch.object(acceptance._STAGE_REPORTING.datetime, "datetime") as clock:
             clock.now.return_value = timestamp
             timer = acceptance.StageTimer(output, monotonic=iter((0.0, 0.0)).__next__)
             with timer.timed_stage("network_boundaries"):

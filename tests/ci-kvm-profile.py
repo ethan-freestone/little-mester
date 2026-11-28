@@ -33,6 +33,8 @@ CONTROL_HELPER = pathlib.Path("/usr/libexec/little-mester-vm/profile-control")
 CONTROL_SUDOERS = pathlib.Path("/etc/sudoers.d/little-mester-vm-profile-control")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 PROFILE_STARTED = False
+PROFILE_DIAGNOSTIC_NAME = "little-mester-profile-failure-diagnostics.txt"
+PROFILE_DIAGNOSTIC_LIMIT = 64 * 1024
 
 
 def load_module(name: str, path: pathlib.Path):
@@ -203,6 +205,84 @@ def cleanup_profile(owner_uid: int, sha: str) -> None:
     print("profile_cleanup=PASS stopped=true persistent_profile_state=retained")
 
 
+def report_profile_startup_diagnostics() -> None:
+    """Capture fixed, bounded, redacted profile evidence before cleanup."""
+    lines: list[str] = ["named_profile_failure_diagnostics=BEGIN"]
+    try:
+        instance = CONTROL._instance(PROFILE_NAME, os.getuid(), os.environ["GITHUB_SHA"])
+        properties = (
+            "LoadState,ActiveState,SubState,Result,MainPID,ControlPID,ExecMainCode,"
+            "ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,TimeoutStartUSec,"
+            "TimeoutStopUSec,ExecStart,ExecStartPost,ExecStop"
+        )
+        commands = (
+            ("profile-unit-properties", ["/usr/bin/systemctl", "show", "--no-pager",
+             f"--property={properties}", instance.vm_unit, instance.proxy_unit]),
+            ("profile-unit-status", ["/usr/bin/systemctl", "status", "--no-pager", "--full",
+             instance.vm_unit, instance.proxy_unit]),
+            ("profile-journal-and-serial", ["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager", "-b",
+             "-u", instance.vm_unit, "-u", instance.proxy_unit, "-n", "120", "-o", "short-iso"]),
+            ("ssh-listener", ["/usr/bin/ss", "-ltnH", f"sport = :{instance.ssh_port}"]),
+            ("proxy-listener", ["/usr/bin/ss", "-ltnH", f"sport = :{instance.proxy_port}"]),
+        )
+        for label, argv in commands:
+            try:
+                return_code, output, truncated = SINGLETON_CI.bounded_diagnostic_command(argv)
+                output = SINGLETON_CI.sanitize_diagnostic_output(output)
+                suffix = " truncated=true" if truncated else ""
+                lines.append(f"--- {label} exit={return_code}{suffix} ---")
+                lines.append(output or "[no output]")
+            except (OSError, subprocess.SubprocessError, ValueError) as error:
+                lines.append(f"--- {label} unavailable ({type(error).__name__}) ---")
+
+        try:
+            rc, raw_pid, truncated = SINGLETON_CI.bounded_diagnostic_command(
+                ["/usr/bin/systemctl", "show", "--property=MainPID", "--value", instance.vm_unit])
+            pid_text = raw_pid.strip() if not truncated and rc == 0 else ""
+            if re.fullmatch(r"[1-9][0-9]{0,8}", pid_text):
+                command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I",
+                           str(CONTROL_HELPER), "service", "qmp-status", PROFILE_NAME, pid_text]
+                qmp_rc, qmp_output, qmp_truncated = SINGLETON_CI.bounded_diagnostic_command(command)
+                qmp_output = SINGLETON_CI.sanitize_diagnostic_output(qmp_output)
+                suffix = " truncated=true" if qmp_truncated else ""
+                lines.append(f"--- qmp-observation exit={qmp_rc}{suffix} ---")
+                lines.append(qmp_output or "[no output]")
+            else:
+                lines.append("--- qmp-observation unavailable (no-live-mainpid) ---")
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            lines.append(f"--- qmp-observation unavailable ({type(error).__name__}) ---")
+    except (KeyError, OSError, RuntimeError, ValueError) as error:
+        lines.append(f"profile-diagnostics-unavailable={type(error).__name__}")
+
+    lines.append("named_profile_failure_diagnostics=END")
+    payload = ("\n".join(lines) + "\n").encode("utf-8", errors="replace")
+    if len(payload) > PROFILE_DIAGNOSTIC_LIMIT:
+        payload = payload[:PROFILE_DIAGNOSTIC_LIMIT - 40] + b"\n[artifact truncated]\n"
+    print(payload.decode("utf-8", errors="replace"), end="", flush=True)
+    runner_temp = os.environ.get("RUNNER_TEMP", "")
+    if not runner_temp.startswith("/"):
+        print("profile_diagnostics_artifact=unavailable (RUNNER_TEMP missing)", flush=True)
+        return
+    artifact = pathlib.Path(runner_temp) / PROFILE_DIAGNOSTIC_NAME
+    try:
+        fd = os.open(artifact, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                count = os.write(fd, view)
+                if count <= 0:
+                    raise OSError("diagnostic artifact write made no progress")
+                view = view[count:]
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        print(f"profile_diagnostics_artifact=created bytes={len(payload)}", flush=True)
+    except (OSError, ValueError) as error:
+        print(f"profile_diagnostics_artifact=unavailable ({type(error).__name__})", flush=True)
+
+
 def qualification() -> None:
     assert_kvm()
     sha = os.environ.get("GITHUB_SHA", "")
@@ -324,6 +404,12 @@ def main() -> int:
         qualification()
         return 0
     except BaseException as error:  # noqa: BLE001 - retain evidence but stop a started guest
+        if PROFILE_STARTED:
+            try:
+                report_profile_startup_diagnostics()
+            except BaseException as diagnostic_error:  # noqa: BLE001 - never mask the startup failure
+                print(f"profile_diagnostics=FAIL error={type(diagnostic_error).__name__}",
+                      file=sys.stderr, flush=True)
         print(f"named_profile_kvm_qualification=FAIL error={type(error).__name__}: {error}",
               file=sys.stderr)
         return 1
