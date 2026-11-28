@@ -24,9 +24,6 @@ jobs:
     name: TypeScript build and tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: little-mester-mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,10 +31,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: little-mester-mcp/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      - run: npm run check:package
-      - run: npm test
+      - run: scripts/validate node
 
   # ── 2. Bats — lab script, TUI JSX guard, exit-confirm static ────
   bats:
@@ -55,7 +49,7 @@ jobs:
           printf 'bats-core commit: %s\n' "$bats_core_commit"
           bats --version
       - name: Run Bats with failure output
-        run: bats --print-output-on-failure tests/
+        run: scripts/validate bats
 
   # ── 3. VM unit & contract tests ──────────────────────────────────
   vm-unit-contract:
@@ -74,36 +68,8 @@ jobs:
         run: |
           sudo npm install --global @opencode/cli@2.2.5
           test "$(opencode --version)" = 'opencode v2.2.5'
-      - name: Run parent suites
-        run: |
-          node --test tests/host-metrics-tui.test.mjs
-          python3 tests/opencode-project-config.test.py
-          python3 tests/ci-tui-diagnostic.test.py
-          python3 tests/ci-tui-capture.test.py
-          python3 tests/ci-kvm-qemu-stop.test.py
-          python3 tests/ci-kvm-ssh.test.py
-          python3 tests/ci-kvm-contract.test.py
-          python3 tests/ci-kvm-stage-state.test.py
-          python3 tests/ci-kvm-qemu-owner.test.py
-          python3 tests/vm-owner-acceptance.test.py
-          python3 tests/vm-systemd.test.py
-          python3 tests/vm-system-workspace.test.py
-          python3 tests/vm-system-metrics.test.py
-          python3 tests/vm-opencode-preferences.test.py
-          python3 tests/vm-host-dependencies.test.py
-          python3 tests/vm-instance.test.py
-          python3 tests/profile-control-core.test.py
-          python3 tests/vm-profile-control.test.py
-          python3 tests/ci-kvm-system-unit.test.py
-          python3 tests/ci-kvm-host-dependencies.test.py
-          python3 tests/vm-guest-user-dirs.test.py
-          python3 tests/ci-qemu-oauth-bridge.test.py
-          python3 tests/ci-kvm-launch.test.py
-          python3 tests/ci-kvm-hostkey.test.py
-          python3 tests/vm-guest-compatibility.test.py
-          for test in tests/vm-parent-*.test.py; do
-            python3 "$test"
-          done
+      - name: Run complete locally runnable Python unit and contract suites
+        run: scripts/validate python-tests
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
@@ -194,10 +160,6 @@ jobs:
         timeout-minutes: 5
         run: |
           bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"
-          python3 tests/vm-browser-auth.test.py
-      - name: Exercise live OAuth harness cancellation cleanup
-        timeout-minutes: 2
-        run: python3 tests/ci-kvm-oauth-cleanup.test.py
       - name: Prove final identity-safe cleanup
         id: smoke_cleanup
         if: always()
@@ -374,26 +336,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-      - name: ShellCheck (lab + shell scripts)
-        run: shellcheck lab scripts/*.sh
-
-      - name: Install development-only Python validation tools
-        run: pip install --target=/tmp/.python-validation ruff mypy
-      - name: Validate all Python sources
-        run: PATH="/tmp/.python-validation/bin:$PATH" python3 scripts/validate-python.py
-        env:
-          PYTHONPATH: /tmp/.python-validation
-      - name: Validate GitHub Actions workflows
-        run: scripts/check-workflows.sh
+      - name: Run shared shell, Python, and workflow hygiene checks
+        run: scripts/validate hygiene
 
   # ── 9. Ticket store ─────────────────────────────────────────────
   ticket-store:
     name: Ticket system validation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: little-mester-mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -401,7 +351,4 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: little-mester-mcp/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      - run: ./scripts/ticket-engine validate
-      - run: git diff --exit-code
+      - run: scripts/validate tickets

@@ -356,6 +356,7 @@ def workflow_job(name):
             return workflow_text[match.end():end]
     raise AssertionError(f'missing workflow job: {name}')
 job = workflow_job('transient-qemu-integration')
+vm_unit_job = workflow_job('vm-unit-contract')
 diagnostics_job = workflow_job('systemd-namespace-diagnostics')
 production_job = workflow_job('production-systemd-vm-acceptance')
 profile_job = workflow_job('vm-profile-integration')
@@ -363,6 +364,8 @@ session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session
 session_contract_text = session_contract.read_text()
 profile_harness = pathlib.Path(sys.argv[1]).parents[1] / 'tests/ci-kvm-profile.py'
 profile_harness_text = profile_harness.read_text()
+singleton_harness = pathlib.Path(sys.argv[1]).parents[1] / 'tests/ci-kvm-system-unit.py'
+singleton_harness_text = singleton_harness.read_text()
 lab_text = pathlib.Path(sys.argv[1]).parents[1].joinpath('lab').read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
 opencode_readiness_text = opencode_readiness_text.read_text()
@@ -418,8 +421,8 @@ staged_invocations = [
 positions = [job.index(invocation) for invocation in staged_invocations]
 assert positions == sorted(positions)
 assert 'if: always()' in job
-assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index('Prove final identity-safe cleanup')
-assert 'python3 tests/ci-kvm-oauth-cleanup.test.py' in job
+assert 'scripts/validate python-tests' in vm_unit_job
+assert 'ci-kvm-oauth-cleanup.test.py' not in job
 assert job.count('ci-kvm-stage.sh --stage') == 6
 assert 'LM_CI_STATE_DIR' in job and 'GITHUB_RUN_ATTEMPT' in job
 assert 'little-mester-transient-kvm-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT' in job
@@ -560,7 +563,8 @@ assert 'run: python3 tests/ci-kvm-profile.py' in profile_job
 assert 'bash tests/ci-kvm-host-dependencies.sh update' in profile_job
 assert 'bash tests/ci-kvm-host-dependencies.sh install' in profile_job
 assert "steps.host_dependencies.outcome == 'success'" in profile_job
-assert 'tools/vm-owner-acceptance' in profile_harness_text
+assert 'tools/vm-owner-acceptance' in singleton_harness_text
+assert 'SINGLETON_CI.install_pinned_candidate(sha, timeout=180, command_runner=run)' in profile_harness_text
 assert 'CI_INSTALL_PREFIX = SINGLETON_CI.CI_INSTALL_PREFIX' in profile_harness_text
 assert '"--prefix", str(CI_INSTALL_PREFIX)' in profile_harness_text
 assert 'str(candidate / "tools/vm-system-install")' in profile_harness_text

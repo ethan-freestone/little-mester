@@ -491,6 +491,11 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertIn(required, installer)
         self.assertIn("--update-code-only", installer)
         self.assertIn('"lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py"', installer)
+        self.assertEqual(system_installer.FILES["lib/vm/executable-policy.py"],
+                         ("/usr/lib/little-mester-vm/executable-policy.py", 0o644))
+        self.assertIn("lib/vm/executable-policy.py", system_installer.UPDATE_ADDITIONALS)
+        self.assertIn("lib/vm/executable-policy.py",
+                      system_installer.PERMANENT_INTERLOCK_RELATIVES)
         self.assertIn('Parse the exact pinned policy before creating accounts', installer)
         self.assertIn('preflight(root, owner)', installer)
         self.assertLess(installer.index('preflight(root, owner)'),

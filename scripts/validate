@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Shared local/CI validation commands. CI may call component modes in parallel.
+set -Eeuo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+readonly ROOT
+PYTHON="${PYTHON:-python3}"
+readonly PYTHON
+cd "$ROOT"
+npm_ready=0
+
+validation_temp_root() {
+  local root="${RUNNER_TEMP:-${TMPDIR:-/tmp/opencode}}"
+  if [[ "$root" == /tmp/opencode && ! -d "$root" ]]; then
+    mkdir -p -- "$root"
+  fi
+  if [[ "$root" == /tmp/opencode && ! -w "$root" ]]; then
+    root=/tmp
+  fi
+  printf '%s\n' "$root"
+}
+
+run_bats() {
+  printf '\n==> Complete Bats suite\n'
+  bats --print-output-on-failure "$ROOT/tests/"
+}
+
+run_python_tests() {
+  printf '\n==> Complete locally runnable Python unit and contract suites\n'
+  local -a tests=()
+  mapfile -d '' -t tests < <(find "$ROOT/tests" -maxdepth 1 -type f \
+    -name '*.test.py' -print0 | sort -z)
+  if ((${#tests[@]} == 0)); then
+    printf 'validate: no Python test files found\n' >&2
+    return 2
+  fi
+
+  if [[ "${CI:-}" == 'true' || "${GITHUB_ACTIONS:-}" == 'true' ]]; then
+    unset LM_SKIP_PRIVILEGED_SCANNER_INSTALL || true
+  else
+    export LM_SKIP_PRIVILEGED_SCANNER_INSTALL=1
+  fi
+
+  local test
+  for test in "${tests[@]}"; do
+    printf '\n--- %s ---\n' "${test#"$ROOT/"}"
+    "$PYTHON" "$test"
+  done
+}
+
+run_python_validation() (
+  set -Eeuo pipefail
+  printf '\n==> Python compile, Ruff, mypy, and extensionless-entrypoint checks\n'
+  local temp_root
+  temp_root="$(validation_temp_root)"
+  [[ -d "$temp_root" && -w "$temp_root" ]] || {
+    printf 'validate: temporary directory is unavailable: %s\n' "$temp_root" >&2
+    exit 2
+  }
+  local work
+  work="$(mktemp -d "$temp_root/lm-python-validation.XXXXXXXX")"
+  trap 'rm -rf -- "$work"' EXIT
+  "$PYTHON" -m pip install --disable-pip-version-check --quiet --target="$work" ruff mypy
+  PATH="$work/bin:$PATH" PYTHONPATH="$work${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON" "$ROOT/scripts/validate-python.py"
+)
+
+run_node() {
+  printf '\n==> Node/TypeScript build, package check, and tests\n'
+  node --test "$ROOT/tests/host-metrics-tui.test.mjs"
+  (
+    cd "$ROOT/little-mester-mcp"
+    npm ci
+    npm run build
+    npm run check:package
+    npm test
+  )
+  npm_ready=1
+}
+
+run_shellcheck() {
+  printf '\n==> ShellCheck\n'
+  shellcheck "$ROOT/lab" "$ROOT/scripts/validate" "$ROOT"/scripts/*.sh
+}
+
+run_workflows() {
+  printf '\n==> GitHub Actions workflow validation\n'
+  TMPDIR="$(validation_temp_root)" "$ROOT/scripts/check-workflows.sh"
+}
+
+run_hygiene() {
+  run_shellcheck
+  run_python_validation
+  run_workflows
+}
+
+run_tickets() {
+  printf '\n==> Ticket-store validation\n'
+  if ((npm_ready == 0)); then
+    (cd "$ROOT/little-mester-mcp" && npm ci)
+    npm_ready=1
+  fi
+  (
+    cd "$ROOT/little-mester-mcp"
+    npm run build
+    ./scripts/ticket-engine validate
+    git diff --exit-code -- .
+  )
+}
+
+run_payload_smoke() {
+  printf '\n==> Isolated installed-profile payload smoke test\n'
+  "$PYTHON" "$ROOT/tests/vm-profile-install-smoke.test.py"
+}
+
+mode="${1:-all}"
+case "$mode" in
+  all)
+    run_bats
+    run_python_tests
+    run_node
+    run_hygiene
+    run_tickets
+    ;;
+  bats) run_bats ;;
+  python-tests) run_python_tests ;;
+  python-validation) run_python_validation ;;
+  node) run_node ;;
+  shellcheck) run_shellcheck ;;
+  workflows) run_workflows ;;
+  hygiene) run_hygiene ;;
+  tickets) run_tickets ;;
+  payload) run_payload_smoke ;;
+  *)
+    printf 'Usage: %s [all|bats|python-tests|python-validation|node|shellcheck|workflows|hygiene|tickets|payload]\n' \
+      "${BASH_SOURCE[0]}" >&2
+    exit 2
+    ;;
+esac

@@ -603,6 +603,14 @@ class ProcessScanTests(unittest.TestCase):
             raise unittest.SkipTest(
                 "NOT RUN: privileged scanner tests require noninteractive sudo; "
                 "authorization unavailable")
+        if os.environ.get("LM_SKIP_PRIVILEGED_SCANNER_INSTALL") == "1":
+            if (os.environ.get("CI", "").lower() == "true"
+                    or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"):
+                raise AssertionError(
+                    "CI cannot skip the privileged scanner installation tests")
+            raise unittest.SkipTest(
+                "NOT RUN: local validation skips the privileged scanner installation "
+                "under /usr/local/lib")
         resolved = owner_acceptance.git(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
         if resolved.returncode:
             raise AssertionError("could not resolve exact source candidate for trusted fixture")
