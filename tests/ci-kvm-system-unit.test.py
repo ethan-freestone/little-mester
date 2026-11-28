@@ -322,6 +322,16 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch:", workflow)
         self.assertNotIn("labeled", workflow)
         self.assertNotIn("diagnostic-only", workflow)
+        triggers = workflow.split("\npermissions:", 1)[0]
+        self.assertIn("  push:\n    branches: [main]", triggers)
+        pull_request = triggers.split("  pull_request:\n", 1)[1]
+        self.assertIn("types: [opened, synchronize, reopened]", pull_request)
+        self.assertNotIn("branches:", pull_request)
+        workflow_dir = ROOT / ".github/workflows"
+        push_workflows = sorted(
+            path.name for path in workflow_dir.glob("*.yml")
+            if re.search(r"(?m)^  push:\s*$", path.read_text()))
+        self.assertEqual(push_workflows, ["ci.yml"])
         self.assertIn("run: python3 tests/ci-kvm-system-unit.py", production)
         self.assertIn("Install disposable-VM host dependencies", production)
         self.assertEqual(production.count("if: always()"), 1)
