@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "active",
   "title": "Independent persistent VM profiles pinned to immutable runtimes",
-  "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
+  "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations. Owner-approved extension (2026-11-25): mapping/resource schema v2 rejects v1 without migration; reset ends unprovisioned and explicit install reprovisions the retained profile, while up never provisions implicitly. Profiles use independent sparse 64-GiB qcow2 overlays over the exact pinned Ubuntu Noble base; the immutable shared base is retained indefinitely in this increment. These decisions do not alter the fixed singleton, legacy development VM, or runtime inventory/prune requirements.",
   "created_at": "2026-11-23T23:21:29.433Z",
-  "updated_at": "2026-11-24T12:46:33.911Z",
+  "updated_at": "2026-11-28T00:12:48.249Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -17,7 +17,7 @@
     },
     {
       "id": "A2",
-      "text": "Each profile has isolated persistent disk, seed, SSH identity/host verification, workspace assignment, network endpoints, lifecycle units, metrics state, and configuration; same-SHA immutable runtime bytes are shared rather than duplicated.",
+      "text": "Each profile has isolated persistent state, workspace assignment, network endpoints, lifecycle units, metrics state and configuration. Every profile owns an independent sparse 64-GiB qcow2 overlay, seed and SSH identities; profiles share only verified immutable approved base-image bytes and same-SHA immutable runtime bytes. Reset/reprovision preserves other profiles and never shares writable disk state or credentials.",
       "status": "pending"
     },
     {
@@ -52,7 +52,7 @@
     },
     {
       "id": "A9",
-      "text": "down stops all profile units/processes without deleting state. Reset/remove require exact TTY confirmation and a fully stopped, job-free profile; reset deletes only the v1 allowlist of VM/seed/SSH identity leaves while preserving mapping/runtime pin, service accounts/units and workspace assignment; remove uses durable phases for exact unit removal/reload, fixed profile state/config removal, verified generated account/group removal, then mapping unlink last. During interrupted removal, absent units are accepted only when durable intent/phase proves the exact manager-owned unit was removed or never created by the recorded install phase; unjournaled absence and failed/unknown/masked units/jobs/processes refuse. Both preserve every workspace and installed runtime. Idempotent journals, account markers, inode checks and interruption tests prevent partial recovery from deleting or reusing unowned state.",
+      "text": "down stops all profile units/processes without deleting state. Reset/remove require exact TTY confirmation and a fully stopped, job-free profile; reset deletes only the v2 allowlist of disk/seed/SSH identity leaves, then commits state unprovisioned while preserving mapping/profile identity, runtime pin, approved base reference, allocations, service accounts/units and workspace assignment. up and guest-dependent operations refuse unprovisioned without mutation; the existing explicit install command reprovisions the same profile using retained identity, runtime/base pins, allocations, units and workspace (no remove/recreate), with a fresh provisioning generation. Remove uses durable phases for exact unit removal/reload, fixed profile state/config removal, verified generated account/group removal, then mapping unlink last. Interrupted removal accepts absent units only with durable intent/phase proof. Reset/remove preserve every workspace, installed runtime, other profile and permanently retained shared base. Idempotent journals, account markers, inode checks and interruption tests prevent partial recovery from deleting or reusing unowned state.",
       "status": "pending"
     },
     {
@@ -63,6 +63,11 @@
     {
       "id": "A11",
       "text": "Named profile VMs can run concurrently within a race-safe host-memory admission budget using real MemTotal/MemAvailable, each active profile cgroup’s unused memory.max-minus-memory.current headroom, and configured profile caps. Admission covers the requested full cgroup cap plus existing profile headroom and a host reserve, and verifies total profile caps against MemTotal. The fixed #20 singleton is mutually exclusive with named profile units through four minimal manifest-owned additive guards installed by the common signed artifact and the common nonblocking shared/exclusive admission lock; refusals name blockers. Base units/runtime/disk/credentials are not replaced or capped, and no singleton workspace check or new singleton resource cap is added. The distinct feat/vm-approach development VM remains usable concurrently with profiles; no code, unit, state, cgroup cap or lifecycle route for it is changed.",
+      "status": "pending"
+    },
+    {
+      "id": "A12",
+      "text": "The reviewed v2 contract is implemented as a closed mapping/resource schema and production parser: v1/unknown mappings reject before effects without migration; a v2 ready mapping proves verified base, sparse 64-GiB overlay, seed and coherent independent SSH artifacts; reset truthfully yields unprovisioned; explicit install reprovisions the same profile without resolving checkout HEAD or changing identity/pins/allocations/workspace; the fixed singleton and legacy development VM remain unaffected; runtime inventory/prune remains required and separate from permanent base retention.",
       "status": "pending"
     }
   ],
@@ -106,7 +111,8 @@
       "Cross-distro implementation test matrix covers exactly Ubuntu, Debian, Arch and CachyOS; Debian uses the apt package-name map, Arch/CachyOS use pacman, and all helper/artifact/runtime/profile/systemd behavior remains common. Test unknown distribution IDs fail before package transactions.",
       "Initial control-bootstrap substrate recovery test: with all four singleton units absent/no state/jobs, bootstrap may idempotently create only the exact lm-vm-control group, empty root-owned 0750 /etc/little-mester-vm directory and empty root:lm-vm-control 0660 code-update.lock under exclusive maintenance. Fault-inject after each substrate step and prove retry validates/adopts only exact objects; unexpected entries, members, ownership, mode or symlink refuse. With installed singleton units, missing/unsafe code lock refuses rather than reconstructing it.",
       "Distribution matrix supersession: earlier cross-distribution tests naming only Ubuntu/CachyOS are partial and are not sufficient; the acceptance matrix is exactly Ubuntu, Debian, Arch and CachyOS, with apt on Debian/Ubuntu and pacman on Arch/CachyOS. Current host-dependencies.py rejects Debian, which must be corrected in #70.",
-      "Fixed singleton workspace verifier state regression covers both assigned and pristine-unassigned states: when assignment exists, exact 20 drop-in bytes and path identity are required; when absent, only a stopped unit with no 20 drop-in/bind is accepted by static layout verification. Full live owner acceptance remains assignment-required; stale/mixed state fails."
+      "Fixed singleton workspace verifier state regression covers both assigned and pristine-unassigned states: when assignment exists, exact 20 drop-in bytes and path identity are required; when absent, only a stopped unit with no 20 drop-in/bind is accepted by static layout verification. Full live owner acceptance remains assignment-required; stale/mixed state fails.",
+      "A12: generated mapping/resource schema and production-parser parity; reject v1/unknown before effects; verify base source-SHA/manifest binding and generation-bound disk, seed and coherent SSH evidence; prove reset to unprovisioned and explicit reprovision preserves identity and pins."
     ],
     "created": [
       "tests/vm-profile-control-core.test.py"
